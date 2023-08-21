@@ -85,6 +85,7 @@ KNOB<BOOL>   KnobDoNotCommitTranslatedCode(KNOB_MODE_WRITEONCE,    "pintool",
 std::ofstream* out = 0;
 std::vector<ADDRINT> hot_rtns;
 std::vector<ADDRINT> inline_cand_rtns;
+std::vector<ADDRINT> hot_call_sites;
 
 // For XED:
 #if defined(TARGET_IA32E)
@@ -138,7 +139,7 @@ typedef struct {
 
 translated_rtn_t *translated_rtn;
 int translated_rtn_num = 0;
-
+INS ins_before_inline;
 
 
 /* ============================================================= */
@@ -871,7 +872,7 @@ int add_created_inst_to_tc(xed_decoded_inst_t *xedd, ADDRINT inst_addr){
 	}
 	return 0;
 }
-int insert_inline_rtn(RTN rtn){
+int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
 	RTN_Open(rtn);
 	cout<<"DEBUG: inlining routine: "<<RTN_Name(rtn)<<" Address: "<<RTN_Address(rtn)<<endl;
 	xed_decoded_inst_t xedd[2];
@@ -886,12 +887,12 @@ int insert_inline_rtn(RTN rtn){
 		return -1;
 	}
 
-	if(add_created_inst_to_tc(&xedd[0],INS_Address(RTN_InsHead(rtn))) < 0){
+	if(add_created_inst_to_tc(&xedd[0],caller_addr) < 0){
 		cout<<"Failed to add LEA -8(%rsp),%rsp"<<endl;
 		RTN_Close(rtn);
 		return -1;
 	}
-	xed_uint_t addr_disp = xed_decoded_inst_get_length(xedd);
+	xed_uint_t addr_disp = 0;//xed_decoded_inst_get_length(&(xedd[0]));
 	for (INS ins =  RTN_InsHead(rtn); !INS_IsRet(ins); ins = INS_Next(ins)) {
 		if(INS_IsRet(ins)){
 			cout<<"DEBUG: Inlining ret"<<endl;
@@ -922,7 +923,7 @@ int insert_inline_rtn(RTN rtn){
 			add_ins_to_tc(ins,addr_disp);			
 		}
 	}
-	if(add_created_inst_to_tc(&xedd[1],INS_Address(RTN_InsHead(rtn))) < 0){
+	if(add_created_inst_to_tc(&xedd[1],INS_Address(RTN_InsTail(rtn))) < 0){
 		cout<<"Failed to add LEA 8(%rsp),%rsp"<<endl;
 		RTN_Close(rtn);
 		return -1;
@@ -963,8 +964,9 @@ int find_candidate_rtns_for_translation(IMG img)
 
 			// Open the RTN.
 			RTN_Open( rtn );              
-
-            for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins)) {
+			INS rtn_head_ins = RTN_InsHead(rtn);
+			RTN_Close(rtn);
+            for (INS ins = rtn_head_ins; INS_Valid(ins); ins = INS_Next(ins)) {
 
     			//debug print of orig instruction:
 				if (KnobVerbose) {
@@ -973,16 +975,24 @@ int find_candidate_rtns_for_translation(IMG img)
 					//xed_print_hex_line(reinterpret_cast<UINT8*>(INS_Address (ins)), INS_Size(ins));				   			
 				}			
 				if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
-					ADDRINT call_target = INS_DirectControlFlowTargetAddress(ins);
-					if(std::find(inline_cand_rtns.begin(), inline_cand_rtns.end(), call_target) != inline_cand_rtns.end()){
-						RTN inline_rtn = RTN_FindByAddress(call_target);
-						cout<<"inlining in RTN: "<<RTN_Name(rtn)<<endl;
-						RTN_Close( rtn ); // closing current routine to work on the iline routine
-						if(insert_inline_rtn(inline_rtn)<0){
-							cout<<"ERROR Failed to inline RTN"<<endl;
+					if(std::find(hot_call_sites.begin(), hot_call_sites.end(), INS_Address(ins)) != hot_call_sites.end()){
+						cerr<<"Next INS is going to be: "<<INS_Address(INS_Next(ins))<<endl;
+						ins_before_inline = ins;
+						ADDRINT call_target = INS_DirectControlFlowTargetAddress(ins);
+						if(std::find(inline_cand_rtns.begin(), inline_cand_rtns.end(), call_target) != inline_cand_rtns.end()){
+							RTN inline_rtn = RTN_FindByAddress(call_target);
+							cerr<<"inlining in RTN: "<<RTN_Name(rtn)<<endl;
+							//RTN_Close( rtn ); // closing current routine to work on the inline routine
+							if(insert_inline_rtn(inline_rtn,INS_Address(ins))<0){
+								cout<<"ERROR Failed to inline RTN"<<endl;
+							}
+							cerr<<"Finished inlining RTN"<<endl;
+							//RTN_Open( rtn );
+							cerr<<"Next INS is going to be: "<<INS_Address(INS_Next(ins))<<endl;
+							ins = ins_before_inline;
+							cerr<<"Fixed to : "<<INS_Address(INS_Next(ins))<<endl;
+							continue;
 						}
-						RTN_Open( rtn );
-						continue;
 					}
 				}
 				ADDRINT addr = INS_Address(ins);
@@ -1016,7 +1026,7 @@ int find_candidate_rtns_for_translation(IMG img)
 
 
 			// Close the RTN.
-			RTN_Close( rtn );
+			//RTN_Close( rtn );
 
 			translated_rtn_num++;
 

@@ -75,8 +75,20 @@ void get_data_from_csv(){
         stringstream ss;
         ss << hex << no_hex_rtn_addr;
         ss >> rtn_addr;
-        //cout<<"RTN ADDR: "<<hex<<rtn_addr<<endl;
         inline_cand_rtns.push_back(rtn_addr); 
+        
+        ADDRINT call_site;
+        string raw_call_site = splitted_line[6];
+        string no_hex_call_site = raw_call_site.substr(3,raw_call_site.length());
+        stringstream ss_call_site;
+        ss_call_site << hex << no_hex_call_site;
+        ss_call_site >> call_site;
+        //cout<<"RTN ADDR: "<<hex<<rtn_addr<<endl;
+        hot_call_sites.push_back(call_site);
+    }
+    cout<<"DEBUG: Hot Call Sites"<<endl;
+    for(auto& caller : hot_call_sites){
+        cout<<hex<<caller<<endl;
     }
     rtn_count_file.close();
     //end of CSV data extraction
