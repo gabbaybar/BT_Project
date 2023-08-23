@@ -7,6 +7,8 @@
 
 #define MAX_RTNS 1000
 #define MAX_LOOPS 10000
+#define MAX_UNCOND_JMPS 10000
+#define MAX_CODE_REORDER_JMPS 10
 #define MAX_INLINE_RTNS 10
 #define HOT_RTNS_TO_OPT 5
 using namespace std;
@@ -53,15 +55,23 @@ typedef struct call_site{
     ADDRINT caller_rtn_addr;
     UINT64 count_calls;
 } call_site_t;
+typedef struct uncond_forward_jmp{
+    ADDRINT rtn_address;
+    ADDRINT address;
+    UINT64 exec_count;
+} uncond_forward_jmp_t;
 
 
 unordered_map<ADDRINT,loop_t> loops; // will hold loop info
 unordered_map<ADDRINT,routine_t> normal_routines; // will hold normal routine info
 unordered_map<ADDRINT,routine_t> inline_cand_routines; // will hold inlining candidate routine info
 unordered_map<ADDRINT,unordered_map<ADDRINT,call_site_t>> callee_map; // for each rtns, will hold the rtns that call it and how many times
+unordered_map<ADDRINT,uncond_forward_jmp_t> uncond_forward_jmps;
 vector<call_site_t> hot_rtns_vec;
+vector<ADDRINT> rtns_to_translate;
 routine_t inline_routines_arr[MAX_RTNS]; //for sorting & exporting purposes
 routine_t normal_routines_arr[MAX_RTNS]; //for sorting & exporting purposes
+uncond_forward_jmp_t uncond_forward_jmps_arr[MAX_UNCOND_JMPS];
 int num_of_inline_rtns;
 int num_of_normal_rtns;
 
@@ -272,7 +282,9 @@ void Routine(RTN rtn, void *v){
     RTN_Close(rtn);
 }
 // end of RTN handle
+
 void do_call_count(int *call_count){ (*call_count)++; }
+void do_jmp_count(UINT64 *jmp_count){ (*jmp_count)++; }
 void Instruction(INS ins, void *v){
     if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
         ADDRINT target_addr = INS_DirectControlFlowTargetAddress(ins);
@@ -288,6 +300,28 @@ void Instruction(INS ins, void *v){
                                     IARG_PTR,
                                     &(callee_map[target_addr][ins_addr].count_calls),
                                     IARG_END);
+    }
+    if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && !INS_HasFallThrough(ins) && 
+        (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
+        ADDRINT ins_addr = INS_Address(ins);
+        if(uncond_forward_jmps.find(ins_addr) == uncond_forward_jmps.end()){
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_jmp_count,
+                                    IARG_PTR,
+                                    &(uncond_forward_jmps[ins_addr].exec_count),
+                                    IARG_END);
+        }
+        else{
+            uncond_forward_jmp_t uncond_jmp;
+            uncond_jmp.address = ins_addr;
+            uncond_jmp.rtn_address = RTN_Address(RTN_FindByAddress(ins_addr));
+            uncond_jmp.exec_count = 0;
+            uncond_forward_jmps[ins_addr] = uncond_jmp;
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_jmp_count,
+                                    IARG_PTR,
+                                    &(uncond_forward_jmps[ins_addr].exec_count),
+                                    IARG_END);
+            
+        }
     }
 }
 // Sort and write RTNs to CSV
@@ -323,12 +357,29 @@ void sort_normal_routines(unordered_map<ADDRINT,routine_t> &routines, routine_t 
     }
     qsort(routines_arr,MAX_RTNS,sizeof(routine_t),compare_normal_rtn);
 }
+int compare_uncond_jmps(const void * a, const void * b){
+    uncond_forward_jmp_t *jmp1 = (uncond_forward_jmp_t*)a;
+    uncond_forward_jmp_t *jmp2 = (uncond_forward_jmp_t*)b;
+    if(jmp1->exec_count > jmp2->exec_count) return -1;
+    else if(jmp1->exec_count == jmp2->exec_count) return 0;
+    return 1;
+}
+void sort_uncond_jmps(unordered_map<ADDRINT,uncond_forward_jmp_t> &uncond_jmps, uncond_forward_jmp_t *uncond_jmps_arr)
+{
+    int idx= 0;
+    for (const auto& info : uncond_jmps) {
+        uncond_jmps_arr[idx] = info.second;
+        idx++;
+    }
+    qsort(uncond_jmps_arr,MAX_UNCOND_JMPS,sizeof(uncond_forward_jmp_t),compare_uncond_jmps);
+}
 bool rtn_in_hot_rtns(ADDRINT rtn_addr){
     for(unsigned i = 0 ; i< hot_rtns_vec.size() ; i++){
         if(hot_rtns_vec[i].caller_rtn_addr == rtn_addr) return true;
     }
     return false;
 }
+
 void write_csv(const string& filename) {
     ofstream ofs = ofstream(filename);
     if (!ofs) {
@@ -337,6 +388,7 @@ void write_csv(const string& filename) {
     }
     int normal_rtns_count = 0;
     int inline_rtns_count = 0;
+    int code_reorder_jmps_count = 0;
     for (int i = 0; i < MAX_RTNS; i++) {
         if(normal_rtns_count >= HOT_RTNS_TO_OPT) break;
         if(normal_routines_arr[i].hot_call_site_count == 0) break;
@@ -344,6 +396,7 @@ void write_csv(const string& filename) {
         if(normal_routines_arr[i].rcount == 0) continue;
         // if(normal_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(!rtn_in_hot_rtns(normal_routines_arr[i].address)) continue;
+        rtns_to_translate.push_back(normal_routines_arr[i].address);
         normal_rtns_count++;
     }
     for (int i = 0; i < MAX_INLINE_RTNS; i++) {
@@ -353,6 +406,12 @@ void write_csv(const string& filename) {
         if(inline_routines_arr[i].hot_call_site == 0) continue;
         if(inline_routines_arr[i].valid == false) continue;
         inline_rtns_count++;
+    }
+    for (int i = 0; i < MAX_UNCOND_JMPS; i++) {
+        if(code_reorder_jmps_count >= MAX_CODE_REORDER_JMPS) break;
+        if(uncond_forward_jmps_arr[i].exec_count == 0) break;
+        if(find(rtns_to_translate.begin(), rtns_to_translate.end(), uncond_forward_jmps_arr[i].rtn_address) == rtns_to_translate.end()) continue;
+        code_reorder_jmps_count++;
     }
     ofs << "normal_rtns,"<<normal_rtns_count<<"\n";
     ofs << "img_name,img_address,rtn_name,rtn_address,instruction_count,invoke_count,hot_call_site_calls\n";
@@ -364,8 +423,8 @@ void write_csv(const string& filename) {
         // if(normal_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(!rtn_in_hot_rtns(normal_routines_arr[i].address)) continue;
         idx++;
-        ofs << normal_routines_arr[i].img_name << ", 0x" << hex << normal_routines_arr[i].img_address << ","
-            << normal_routines_arr[i].name << ", 0x" << hex << normal_routines_arr[i].address << ","
+        ofs << normal_routines_arr[i].img_name << ",0x" << hex << normal_routines_arr[i].img_address << ","
+            << normal_routines_arr[i].name << ",0x" << hex << normal_routines_arr[i].address << ","
             << dec << normal_routines_arr[i].icount << "," << normal_routines_arr[i].rcount << ","
             << dec << normal_routines_arr[i].hot_call_site_count <<"\n";
     }
@@ -377,12 +436,25 @@ void write_csv(const string& filename) {
         // if(inline_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(inline_routines_arr[i].hot_call_site == 0) continue;
         if(inline_routines_arr[i].valid == false) continue;
-        ofs << inline_routines_arr[i].img_name << ", 0x" << hex << inline_routines_arr[i].img_address << ","
-            << inline_routines_arr[i].name << ", 0x" << hex << inline_routines_arr[i].address << ","
-            << dec << inline_routines_arr[i].icount << "," << inline_routines_arr[i].rcount << ", 0x"
-            << hex << inline_routines_arr[i].hot_call_site << ", 0x"
+        ofs << inline_routines_arr[i].img_name << ",0x" << hex << inline_routines_arr[i].img_address << ","
+            << inline_routines_arr[i].name << ",0x" << hex << inline_routines_arr[i].address << ","
+            << dec << inline_routines_arr[i].icount << "," << inline_routines_arr[i].rcount << ",0x"
+            << hex << inline_routines_arr[i].hot_call_site << ",0x"
             << hex << inline_routines_arr[i].hot_call_site_rtn << ","
             << dec << inline_routines_arr[i].hot_call_site_count <<"\n";
+    }
+    
+    ofs << "code_reorder_jmps_count, "<<code_reorder_jmps_count<<"\n";
+    ofs << "jmp_address,jmp_rtn_address,exec_count\n";
+    idx = 0;
+    for (int i = 0; i < MAX_UNCOND_JMPS; i++) {
+        if(idx >= MAX_CODE_REORDER_JMPS) break;
+        if(uncond_forward_jmps_arr[i].exec_count == 0) break;
+        if(find(rtns_to_translate.begin(), rtns_to_translate.end(), uncond_forward_jmps_arr[i].rtn_address) == rtns_to_translate.end()) continue;
+        idx++;
+        ofs << "0x" << hex << uncond_forward_jmps_arr[i].address << ",0x" 
+            << hex << uncond_forward_jmps_arr[i].rtn_address << ", "
+            << dec << uncond_forward_jmps_arr[i].exec_count << "\n";
     }
     ofs.close();
 }
@@ -436,6 +508,7 @@ void create_hot_rtns_vec(){
 
 // FINI
 void Fini(INT32 code, void *v){
+    sort_uncond_jmps(uncond_forward_jmps,uncond_forward_jmps_arr);
     sort_inline_routines(inline_cand_routines,inline_routines_arr);
     normal_routines.insert(inline_cand_routines.begin(),inline_cand_routines.end());
     create_hot_rtns_vec();
@@ -448,6 +521,7 @@ int profiling()
 {
     memset(inline_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
     memset(normal_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
+    memset(uncond_forward_jmps_arr,0,sizeof(uncond_forward_jmp_t)*MAX_UNCOND_JMPS);
     num_of_inline_rtns = 0;
     num_of_normal_rtns = 0;
     RTN_AddInstrumentFunction(Routine,0);

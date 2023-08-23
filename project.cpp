@@ -47,7 +47,7 @@ void get_data_from_csv(){
         split_delim(line, ',',splitted_line);
         ADDRINT rtn_addr;
         string raw_rtn_addr = splitted_line[3];
-        string no_hex_rtn_addr = raw_rtn_addr.substr(3,raw_rtn_addr.length());
+        string no_hex_rtn_addr = raw_rtn_addr.substr(2,raw_rtn_addr.length());
         stringstream ss;
         ss << hex << no_hex_rtn_addr;
         ss >> rtn_addr;
@@ -71,25 +71,45 @@ void get_data_from_csv(){
         split_delim(line, ',',splitted_line);
         ADDRINT rtn_addr;
         string raw_rtn_addr = splitted_line[3];
-        string no_hex_rtn_addr = raw_rtn_addr.substr(3,raw_rtn_addr.length());
+        string no_hex_rtn_addr = raw_rtn_addr.substr(2,raw_rtn_addr.length());
         stringstream ss;
         ss << hex << no_hex_rtn_addr;
         ss >> rtn_addr;
         inline_cand_rtns.push_back(rtn_addr); 
-        
+
         ADDRINT call_site;
         string raw_call_site = splitted_line[6];
-        string no_hex_call_site = raw_call_site.substr(3,raw_call_site.length());
+        string no_hex_call_site = raw_call_site.substr(2,raw_call_site.length());
         stringstream ss_call_site;
         ss_call_site << hex << no_hex_call_site;
         ss_call_site >> call_site;
-        //cout<<"RTN ADDR: "<<hex<<rtn_addr<<endl;
+        cout<<"RTN ADDR: "<<hex<<rtn_addr<<endl;
         hot_call_sites.push_back(call_site);
     }
-    cout<<"DEBUG: Hot Call Sites"<<endl;
-    for(auto& caller : hot_call_sites){
-        cout<<hex<<caller<<endl;
+    
+    int num_of_reorder_jmps = 0;
+    getline(rtn_count_file, line); // First row - inline candidate rtns
+    vector<string> reorder_jmps_splitted_line;
+    split_delim(line, ',',reorder_jmps_splitted_line);
+    istringstream iss2_num_of_reorder_jmps(reorder_jmps_splitted_line[1]);
+    iss2_num_of_reorder_jmps >> num_of_reorder_jmps;
+
+    getline(rtn_count_file, line); // Thorwing away the first line (headers)
+    for(int i=0 ; i < num_of_reorder_jmps ; i++){
+        // Parse the CSV file and extract jmp address
+        getline(rtn_count_file, line);
+        vector<string> splitted_line;
+        split_delim(line, ',',splitted_line);
+        ADDRINT jmp_addr;
+        string raw_jmp_addr = splitted_line[0];
+        string no_hex_jmp_addr = raw_jmp_addr.substr(2,raw_jmp_addr.length());
+        stringstream ss;
+        ss << hex << no_hex_jmp_addr;
+        ss >> jmp_addr;
+        reorder_unocond_jmps.push_back(jmp_addr); 
+        cout<<hex<<jmp_addr<<endl;
     }
+
     rtn_count_file.close();
     //end of CSV data extraction
 }

@@ -82,10 +82,11 @@ KNOB<BOOL>   KnobDoNotCommitTranslatedCode(KNOB_MODE_WRITEONCE,    "pintool",
 /* ===================================================================== */
 /* Global Variables */
 /* ===================================================================== */
-std::ofstream* out = 0;
-std::vector<ADDRINT> hot_rtns;
-std::vector<ADDRINT> inline_cand_rtns;
-std::vector<ADDRINT> hot_call_sites;
+ofstream* out = 0;
+vector<ADDRINT> hot_rtns;
+vector<ADDRINT> inline_cand_rtns;
+vector<ADDRINT> hot_call_sites;
+vector<ADDRINT> reorder_unocond_jmps;
 
 // For XED:
 #if defined(TARGET_IA32E)
@@ -955,7 +956,7 @@ int find_candidate_rtns_for_translation(IMG img)
 			}
 			// Check if the routine is one of the top 10
 			ADDRINT rtn_addr = RTN_Address(rtn);
-			if(std::find(hot_rtns.begin(), hot_rtns.end(), rtn_addr) == hot_rtns.end()) continue;
+			if(find(hot_rtns.begin(), hot_rtns.end(), rtn_addr) == hot_rtns.end()) continue;
 			
 			translated_rtn[translated_rtn_num].rtn_addr = rtn_addr;			
 			translated_rtn[translated_rtn_num].rtn_size = RTN_Size(rtn);
@@ -975,11 +976,11 @@ int find_candidate_rtns_for_translation(IMG img)
 					//xed_print_hex_line(reinterpret_cast<UINT8*>(INS_Address (ins)), INS_Size(ins));				   			
 				}			
 				if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
-					if(std::find(hot_call_sites.begin(), hot_call_sites.end(), INS_Address(ins)) != hot_call_sites.end()){
+					if(find(hot_call_sites.begin(), hot_call_sites.end(), INS_Address(ins)) != hot_call_sites.end()){
 						cerr<<"Next INS is going to be: "<<INS_Address(INS_Next(ins))<<endl;
 						ins_before_inline = ins;
 						ADDRINT call_target = INS_DirectControlFlowTargetAddress(ins);
-						if(std::find(inline_cand_rtns.begin(), inline_cand_rtns.end(), call_target) != inline_cand_rtns.end()){
+						if(find(inline_cand_rtns.begin(), inline_cand_rtns.end(), call_target) != inline_cand_rtns.end()){
 							RTN inline_rtn = RTN_FindByAddress(call_target);
 							cerr<<"inlining in RTN: "<<RTN_Name(rtn)<<endl;
 							//RTN_Close( rtn ); // closing current routine to work on the inline routine
