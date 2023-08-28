@@ -87,7 +87,7 @@ vector<ADDRINT> hot_rtns;
 vector<ADDRINT> inline_cand_rtns;
 vector<ADDRINT> hot_call_sites;
 vector<ADDRINT> reorder_unocond_jmps;
-
+#define JMPQ_SIZE 9
 // For XED:
 #if defined(TARGET_IA32E)
     xed_state_t dstate = {XED_MACHINE_MODE_LONG_64, XED_ADDRESS_WIDTH_64b};
@@ -301,7 +301,9 @@ void dump_tc()
 /*************************/
 /* add_new_instr_entry() */
 /*************************/
-int add_new_instr_entry(xed_decoded_inst_t *xedd, ADDRINT pc, unsigned int size)
+ADDRINT last_translated_inst_addr;
+ADDRINT next_translated_inst_addr;
+int add_new_instr_entry(xed_decoded_inst_t *xedd, ADDRINT pc, unsigned int size, bool code_reorder = false)
 {
 
 	// copy orig instr to instr map:
@@ -341,11 +343,12 @@ int add_new_instr_entry(xed_decoded_inst_t *xedd, ADDRINT pc, unsigned int size)
 	instr_map[num_of_instr_map_entries].targ_map_entry = -1;
 	instr_map[num_of_instr_map_entries].size = new_size;	
     instr_map[num_of_instr_map_entries].category_enum = xed_decoded_inst_get_category(xedd);
-
+	last_translated_inst_addr = (ADDRINT)&tc[tc_cursor];
 	num_of_instr_map_entries++;
 
 	// update expected size of tc:
 	tc_cursor += new_size;    	     
+	next_translated_inst_addr = (ADDRINT)&tc[tc_cursor];
 
 	if (num_of_instr_map_entries >= max_ins_count) {
 		cerr << "out of memory for map_instr" << endl;
@@ -355,7 +358,11 @@ int add_new_instr_entry(xed_decoded_inst_t *xedd, ADDRINT pc, unsigned int size)
 
     // debug print new encoded instr:
 	if (KnobVerbose) {
-		cerr << "    new instr:";
+		cerr<<"    ";
+		if(code_reorder){
+			cerr<<"orig instr addr: "<<hex<<pc<<" ";
+		}
+		cerr << "new instr:";
 		dump_instr_from_mem((ADDRINT *)instr_map[num_of_instr_map_entries-1].encoded_ins, instr_map[num_of_instr_map_entries-1].new_ins_addr);
 	}
 
@@ -735,7 +742,7 @@ int fix_instructions_displacements()
    return 0;
  }
 
-int add_ins_to_tc(INS ins, ADDRINT addr_disp = 0){
+int add_ins_to_tc(INS ins, bool code_reorder = false){
 	ADDRINT addr = INS_Address(ins) ;
                 			
 	xed_decoded_inst_t xedd;
@@ -751,7 +758,7 @@ int add_ins_to_tc(INS ins, ADDRINT addr_disp = 0){
 	}
 	
 	// Add instr into instr map:
-	int rc = add_new_instr_entry(&xedd, INS_Address(ins) + addr_disp, INS_Size(ins));
+	int rc = add_new_instr_entry(&xedd, INS_Address(ins), INS_Size(ins), code_reorder);
 	if (rc < 0) {
 		cerr << "ERROR: failed during instructon translation." << endl;
 		translated_rtn[translated_rtn_num].instr_map_entry = -1;
@@ -823,7 +830,7 @@ int create_lea_inst(int disp, xed_decoded_inst_t *xedd){
 	}
 	return 0;
 }
-int create_direct_jump_inst( ADDRINT disp, xed_decoded_inst_t *xedd){
+int create_direct_jump_inst( ADDRINT disp , xed_decoded_inst_t *xedd, int sign = 1){
 	xed_encoder_instruction_t inst;
  	xed_error_enum_t xed_error;
     xed_uint8_t itext[XED_MAX_INSTRUCTION_BYTES];
@@ -834,9 +841,17 @@ int create_direct_jump_inst( ADDRINT disp, xed_decoded_inst_t *xedd){
 	xed_state_zero(&state);
 	state.stack_addr_width=XED_ADDRESS_WIDTH_64b;
     state.mmode=XED_MACHINE_MODE_LONG_64;
+	xed_int32_t brdisp = disp*sign;
+	if(sign == 1){
+		brdisp = (disp-JMPQ_SIZE);
+	}
+	else{
+		brdisp = -1*((xed_int32_t)disp+JMPQ_SIZE);
+	}
+	
 	xed_inst1(&inst, 
               state, XED_ICLASS_JMP, 64,
-              xed_relbr(disp,32)
+              xed_relbr(brdisp,32)
 			  );
 	xed_encoder_request_zero_set_mode(&enc_req, &(inst.mode));
 	xed_bool_t convert_ok = xed_convert_to_encoder_request(&enc_req, &inst);
@@ -863,9 +878,9 @@ int create_direct_jump_inst( ADDRINT disp, xed_decoded_inst_t *xedd){
 	}
 	return 0;
 }
-int add_created_inst_to_tc(xed_decoded_inst_t *xedd, ADDRINT inst_addr){
+int add_created_inst_to_tc(xed_decoded_inst_t *xedd, ADDRINT inst_addr, bool code_reorder = false){
 	xed_uint_t length = xed_decoded_inst_get_length(xedd);
-	int rc = add_new_instr_entry(xedd, inst_addr, length);
+	int rc = add_new_instr_entry(xedd, inst_addr, length, code_reorder);
 	if (rc < 0) {
 		cerr << "ERROR: failed during instructon translation." << endl;
 		translated_rtn[translated_rtn_num].instr_map_entry = -1;
@@ -893,7 +908,6 @@ int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
 		RTN_Close(rtn);
 		return -1;
 	}
-	xed_uint_t addr_disp = 0;//xed_decoded_inst_get_length(&(xedd[0]));
 	for (INS ins =  RTN_InsHead(rtn); !INS_IsRet(ins); ins = INS_Next(ins)) {
 		if(INS_IsRet(ins)){
 			cout<<"DEBUG: Inlining ret"<<endl;
@@ -921,7 +935,7 @@ int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
 			}
 		}
 		else{
-			add_ins_to_tc(ins,addr_disp);			
+			add_ins_to_tc(ins);			
 		}
 	}
 	if(add_created_inst_to_tc(&xedd[1],INS_Address(RTN_InsTail(rtn))) < 0){
@@ -932,7 +946,48 @@ int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
 	RTN_Close(rtn);
 	return 0;
 }
-
+int reorder_rtn(RTN rtn,INS jmp_ins){
+	RTN_Open(rtn);
+	ADDRINT jmp_target = INS_DirectControlFlowTargetAddress(jmp_ins);
+	INS target_ins;
+	
+	for(target_ins = jmp_ins; INS_Address(target_ins) < jmp_target ; target_ins = INS_Next(target_ins)){
+		continue;
+	}
+	ADDRINT target_translated_addr = 0;
+	for (INS ins = target_ins; INS_Valid(ins); ins = INS_Next(ins)){ // Translate the jmp target til the end of RTN
+		add_ins_to_tc(ins,true);
+		if(target_translated_addr == 0){
+			target_translated_addr = last_translated_inst_addr; // This is the TC address of the jmp target
+		}
+	}
+	cerr<<"Finished copying target"<<endl;
+	cerr<<"copying Fall Throught"<<endl;
+	ADDRINT new_rtn_tail_address = jmp_target;
+	for(INS ins = INS_Next(jmp_ins) ; INS_Address(ins) < jmp_target ; ins = INS_Next(ins)){ // Translate the jmp FT
+		if(INS_Address(INS_Next(ins)) != jmp_target)
+			new_rtn_tail_address += INS_Size(ins);
+		add_ins_to_tc(ins,true);
+	}
+	ADDRINT new_jmp_disp = new_rtn_tail_address - INS_Address(jmp_ins);
+	//if( new_jmp_disp > 0) cout<<"ERROR: new jump displacement is positive "<<dec<<new_jmp_disp<<endl;
+	xed_decoded_inst_t xedd;
+	ADDRINT new_jmp_address_in_tc = next_translated_inst_addr; // This is the address of the last jmp we are creating to jump back to the FT part
+	new_jmp_disp = new_jmp_address_in_tc - target_translated_addr;
+	if(create_direct_jump_inst(new_jmp_disp, &xedd, -1) < 0){
+		RTN_Close(rtn);
+		cout<<"Failed to create jump inst"<<endl;
+		return -1;
+	}
+	if(add_created_inst_to_tc(&xedd,INS_Address(RTN_InsTail(rtn)), true) < 0){
+		cout<<"Failed to add jump"<<endl;
+		RTN_Close(rtn);
+		return -1;
+	}
+	instr_map[num_of_instr_map_entries-1].orig_targ_addr = jmp_target; 
+	RTN_Close(rtn);
+	return 0;
+}
 /*****************************************/
 /* find_candidate_rtns_for_translation() */
 /*****************************************/
@@ -974,7 +1029,8 @@ int find_candidate_rtns_for_translation(IMG img)
  					cerr << "old instr: ";
 					cerr << "0x" << hex << INS_Address(ins) << ": " << INS_Disassemble(ins) <<  endl;
 					//xed_print_hex_line(reinterpret_cast<UINT8*>(INS_Address (ins)), INS_Size(ins));				   			
-				}			
+				}
+				// Function Inlining	
 				if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
 					if(find(hot_call_sites.begin(), hot_call_sites.end(), INS_Address(ins)) != hot_call_sites.end()){
 						cerr<<"Next INS is going to be: "<<INS_Address(INS_Next(ins))<<endl;
@@ -995,6 +1051,20 @@ int find_candidate_rtns_for_translation(IMG img)
 							continue;
 						}
 					}
+				}
+				// Code Reordering
+				if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && !INS_HasFallThrough(ins) && 
+				  (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
+					if(find(reorder_unocond_jmps.begin(), reorder_unocond_jmps.end(), INS_Address(ins)) != reorder_unocond_jmps.end()){
+						if(reorder_rtn(rtn, ins) < 0) {
+							cout<<"ERROR Failed to reorder RTN"<<endl;
+						}
+						else {
+							cerr<<"Finished reordering RTN"<<endl;
+							break;
+						}
+						
+					}		
 				}
 				ADDRINT addr = INS_Address(ins);
                 			
@@ -1274,15 +1344,8 @@ INT32 Usage()
 int rtn_translaion_main(int argc, char * argv[])
 {
 
-    // // Initialize pin & symbol manager
-    // //out = new std::ofstream("xed-print.out");
-
-    // if( PIN_Init(argc,argv) )
-    //     return Usage();
-
-    // PIN_InitSymbols();
-
-	// Register ImageLoad
+	last_translated_inst_addr = 0;
+	next_translated_inst_addr = 0;
 	IMG_AddInstrumentFunction(ImageLoad, 0);
 
     // Start the program, never returns
