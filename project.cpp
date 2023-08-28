@@ -83,7 +83,6 @@ void get_data_from_csv(){
         stringstream ss_call_site;
         ss_call_site << hex << no_hex_call_site;
         ss_call_site >> call_site;
-        cout<<"RTN ADDR: "<<hex<<rtn_addr<<endl;
         hot_call_sites.push_back(call_site);
     }
     
@@ -106,7 +105,7 @@ void get_data_from_csv(){
         stringstream ss;
         ss << hex << no_hex_jmp_addr;
         ss >> jmp_addr;
-        reorder_unocond_jmps.push_back(jmp_addr); 
+        reorder_direct_jmps.push_back(jmp_addr); 
         cout<<hex<<jmp_addr<<endl;
     }
 

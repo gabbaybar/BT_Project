@@ -86,7 +86,7 @@ ofstream* out = 0;
 vector<ADDRINT> hot_rtns;
 vector<ADDRINT> inline_cand_rtns;
 vector<ADDRINT> hot_call_sites;
-vector<ADDRINT> reorder_unocond_jmps;
+vector<ADDRINT> reorder_direct_jmps;
 #define JMPQ_SIZE 9
 // For XED:
 #if defined(TARGET_IA32E)
@@ -741,7 +741,136 @@ int fix_instructions_displacements()
 
    return 0;
  }
+int revert_cond_jmp(INS ins, xed_decoded_inst_t *new_xedd)
+{
+	xed_decoded_inst_t *xedd = INS_XedDec(ins);
+	
+	xed_category_enum_t category_enum = xed_decoded_inst_get_category(xedd);
 
+	if (category_enum != XED_CATEGORY_COND_BR){
+		cerr<<"ERROR: ins is not a branch! "<<INS_Disassemble(ins)<<endl;
+		return -1;
+	}
+
+	xed_iclass_enum_t iclass_enum = xed_decoded_inst_get_iclass(xedd);
+
+	if (iclass_enum == XED_ICLASS_JRCXZ){
+		cerr<<"ERROR: do not revert JRCXZ "<<INS_Disassemble(ins)<<endl;
+		return -1;
+		//continue;    // do not revert JRCXZ
+	}
+
+	xed_iclass_enum_t 	retverted_iclass;
+
+	switch (iclass_enum) {
+
+		case XED_ICLASS_JB:
+			retverted_iclass = XED_ICLASS_JNB;		
+			break;
+
+		case XED_ICLASS_JBE:
+			retverted_iclass = XED_ICLASS_JNBE;
+			break;
+
+		case XED_ICLASS_JL:
+			retverted_iclass = XED_ICLASS_JNL;
+			break;
+	
+		case XED_ICLASS_JLE:
+			retverted_iclass = XED_ICLASS_JNLE;
+			break;
+
+		case XED_ICLASS_JNB: 
+			retverted_iclass = XED_ICLASS_JB;
+			break;
+
+		case XED_ICLASS_JNBE: 
+			retverted_iclass = XED_ICLASS_JBE;
+			break;
+
+		case XED_ICLASS_JNL:
+		retverted_iclass = XED_ICLASS_JL;
+			break;
+
+		case XED_ICLASS_JNLE:
+			retverted_iclass = XED_ICLASS_JLE;
+			break;
+
+		case XED_ICLASS_JNO:
+			retverted_iclass = XED_ICLASS_JO;
+			break;
+
+		case XED_ICLASS_JNP: 
+			retverted_iclass = XED_ICLASS_JP;
+			break;
+
+		case XED_ICLASS_JNS: 
+			retverted_iclass = XED_ICLASS_JS;
+			break;
+
+		case XED_ICLASS_JNZ:
+			retverted_iclass = XED_ICLASS_JZ;
+			break;
+
+		case XED_ICLASS_JO:
+			retverted_iclass = XED_ICLASS_JNO;
+			break;
+
+		case XED_ICLASS_JP: 
+			retverted_iclass = XED_ICLASS_JNP;
+			break;
+
+		case XED_ICLASS_JS: 
+			retverted_iclass = XED_ICLASS_JNS;
+			break;
+
+		case XED_ICLASS_JZ:
+			retverted_iclass = XED_ICLASS_JNZ;
+			break;
+
+		default:
+			cerr<<"ERROR: iclass error iclass = "<<iclass_enum<<endl;
+			return -1; // Should never get here
+	}
+
+	// Converts the decoder request to a valid encoder request:
+	xed_encoder_request_init_from_decode (xedd);
+
+	// set the reverted opcode;
+	xed_encoder_request_set_iclass	(xedd, retverted_iclass);
+
+	xed_uint8_t enc_buf[XED_MAX_INSTRUCTION_BYTES];
+	unsigned int max_size = XED_MAX_INSTRUCTION_BYTES;
+	unsigned int new_size = 0;
+
+	xed_error_enum_t xed_error = xed_encode (xedd, enc_buf, max_size, &new_size);
+	if (xed_error != XED_ERROR_NONE) {
+		cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) <<  endl;
+		return -1;
+	}		
+	
+
+	//print the original and the new reverted cond instructions:
+	if (KnobVerbose) {
+		cerr<<"Reverting Cond Jmp"<<endl;
+		cerr << "orig instr: " << hex << INS_Address(ins) << " " << INS_Disassemble(ins) << endl;
+	}
+	char buf[2048];		
+	xed_decoded_inst_zero_set_mode(new_xedd,&dstate);
+
+	xed_error_enum_t xed_code = xed_decode(new_xedd, enc_buf, XED_MAX_INSTRUCTION_BYTES);
+	if (xed_code != XED_ERROR_NONE) {
+		cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << INS_Address(ins) << endl;
+		return -1;
+	}
+
+	xed_format_context(XED_SYNTAX_INTEL, new_xedd, buf, 2048, INS_Address(ins), 0, 0);
+	if (KnobVerbose) {
+		cerr << "new  instr: " << hex << INS_Address(ins) << " " << buf << endl << endl;
+	}
+	return 0;
+
+}
 int add_ins_to_tc(INS ins, bool code_reorder = false){
 	ADDRINT addr = INS_Address(ins) ;
                 			
@@ -766,28 +895,6 @@ int add_ins_to_tc(INS ins, bool code_reorder = false){
 	}
 	return 0;
 }
-// int create_new_sub(INS old_sub, xed_encoder_instruction_t *inst){
-// 	xed_int64_t immediate = 4;
-// 	xed_decoded_inst_t decoded_inst;
-// 	xed_decoded_inst_zero_set_mode(&decoded_inst, &dstate); 
-// 	if(INS_IsSub(old_sub)){			   
-// 		xed_error_enum_t xed_code = xed_decode(&decoded_inst, reinterpret_cast<UINT8*>(INS_Address(old_sub)), max_inst_len);
-// 		if (xed_code != XED_ERROR_NONE) {
-// 			cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << INS_Address(old_sub) << endl;
-// 			return -1;
-// 		}
-// 		immediate += xed_decoded_inst_get_unsigned_immediate(&decoded_inst);
-// 	}
-// 	xed_state_zero(&dstate);
-// 	dstate.stack_addr_width=XED_ADDRESS_WIDTH_64b;
-//     dstate.mmode=XED_MACHINE_MODE_LONG_64;
-// 	xed_inst2(inst, 
-//               dstate, XED_ICLASS_SUB, 64, 
-// 			  xed_reg(XED_REG_RSP),
-// 			  xed_imm0(immediate,32)
-// 			  );
-// 	return immediate;
-// }
 
 int create_lea_inst(int disp, xed_decoded_inst_t *xedd){
 	xed_encoder_instruction_t inst;
@@ -949,8 +1056,15 @@ int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
 int reorder_rtn(RTN rtn,INS jmp_ins){
 	RTN_Open(rtn);
 	ADDRINT jmp_target = INS_DirectControlFlowTargetAddress(jmp_ins);
+	ADDRINT jmp_address = INS_Address(jmp_ins);
 	INS target_ins;
 	
+	xed_decoded_inst_t xedd_cond_jmp;
+	if(INS_HasFallThrough(jmp_ins)){
+		if(revert_cond_jmp(jmp_ins,&xedd_cond_jmp)<0) return -1;
+		add_created_inst_to_tc(&xedd_cond_jmp,jmp_address,true);
+	}
+
 	for(target_ins = jmp_ins; INS_Address(target_ins) < jmp_target ; target_ins = INS_Next(target_ins)){
 		continue;
 	}
@@ -984,7 +1098,7 @@ int reorder_rtn(RTN rtn,INS jmp_ins){
 		RTN_Close(rtn);
 		return -1;
 	}
-	instr_map[num_of_instr_map_entries-1].orig_targ_addr = jmp_target; 
+	instr_map[num_of_instr_map_entries-1].orig_targ_addr = INS_HasFallThrough(jmp_ins) ? jmp_address : jmp_target; 
 	RTN_Close(rtn);
 	return 0;
 }
@@ -1053,9 +1167,12 @@ int find_candidate_rtns_for_translation(IMG img)
 					}
 				}
 				// Code Reordering
-				if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && !INS_HasFallThrough(ins) && 
+				if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
 				  (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
-					if(find(reorder_unocond_jmps.begin(), reorder_unocond_jmps.end(), INS_Address(ins)) != reorder_unocond_jmps.end()){
+					if(find(reorder_direct_jmps.begin(), reorder_direct_jmps.end(), INS_Address(ins)) != reorder_direct_jmps.end()){
+						if (KnobVerbose) {
+							cerr << "Starting code reordering" << endl;
+						}			
 						if(reorder_rtn(rtn, ins) < 0) {
 							cout<<"ERROR Failed to reorder RTN"<<endl;
 						}
