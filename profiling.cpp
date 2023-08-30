@@ -297,6 +297,8 @@ void do_cond_jmp_count(INT32 taken, direct_forward_jmp_t *cond_jmp){
     }
 }
 void Instruction(INS ins, void *v){
+    RTN rtn = RTN_FindByAddress(INS_Address(ins));
+    if((normal_routines.find(RTN_Address(rtn)) == normal_routines.end()) && (inline_cand_routines.find(RTN_Address(rtn)) == inline_cand_routines.end())) return;
     if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
         ADDRINT target_addr = INS_DirectControlFlowTargetAddress(ins);
         ADDRINT ins_addr = INS_Address(ins);
@@ -425,6 +427,7 @@ void write_csv(const string& filename) {
         cout<<"Cannot open file: " <<filename<<"\n";
         return;
     }
+    vector<ADDRINT> all_translated_rtns;
     int normal_rtns_count = 0;
     int inline_rtns_count = 0;
     int code_reorder_jmps_count = 0;
@@ -461,6 +464,7 @@ void write_csv(const string& filename) {
         if(normal_routines_arr[i].rcount == 0) break;
         // if(normal_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(!rtn_in_hot_rtns(normal_routines_arr[i].address)) continue;
+        all_translated_rtns.push_back(normal_routines_arr[i].address);
         idx++;
         ofs << normal_routines_arr[i].img_name << ",0x" << hex << normal_routines_arr[i].img_address << ","
             << normal_routines_arr[i].name << ",0x" << hex << normal_routines_arr[i].address << ","
@@ -475,6 +479,7 @@ void write_csv(const string& filename) {
         // if(inline_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(inline_routines_arr[i].hot_call_site == 0) continue;
         if(inline_routines_arr[i].valid == false) continue;
+        all_translated_rtns.push_back(inline_routines_arr[i].address);
         ofs << inline_routines_arr[i].img_name << ",0x" << hex << inline_routines_arr[i].img_address << ","
             << inline_routines_arr[i].name << ",0x" << hex << inline_routines_arr[i].address << ","
             << dec << inline_routines_arr[i].icount << "," << inline_routines_arr[i].rcount << ",0x"
@@ -489,7 +494,7 @@ void write_csv(const string& filename) {
     for (int i = 0; i < MAX_DIRECT_JMPS; i++) {
         if(idx >= MAX_CODE_REORDER_JMPS) break;
         if(direct_forward_jmps_arr[i].exec_count == 0) break;
-        if(find(rtns_to_translate.begin(), rtns_to_translate.end(), direct_forward_jmps_arr[i].rtn_address) == rtns_to_translate.end()) continue;
+        if(find(all_translated_rtns.begin(), all_translated_rtns.end(), direct_forward_jmps_arr[i].rtn_address) == all_translated_rtns.end()) continue;
         idx++;
         ofs << "0x" << hex << direct_forward_jmps_arr[i].address << ",0x" 
             << hex << direct_forward_jmps_arr[i].rtn_address << ", "
@@ -549,11 +554,12 @@ void create_hot_rtns_vec(){
 
 // FINI
 void Fini(INT32 code, void *v){
-    sort_forward_jmps(direct_forward_jmps,direct_forward_jmps_arr);
+    
     sort_inline_routines(inline_cand_routines,inline_routines_arr);
     normal_routines.insert(inline_cand_routines.begin(),inline_cand_routines.end());
     create_hot_rtns_vec();
     sort_normal_routines(normal_routines, normal_routines_arr);
+    sort_forward_jmps(direct_forward_jmps,direct_forward_jmps_arr);
     write_csv("rtn-count.csv");
 }
 // END of FINI

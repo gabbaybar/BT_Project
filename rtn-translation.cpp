@@ -142,7 +142,7 @@ translated_rtn_t *translated_rtn;
 int translated_rtn_num = 0;
 INS ins_before_inline;
 
-
+int reorder_rtn(RTN rtn,INS jmp_ins, bool inside_inlined_rtn, xed_decoded_inst_t *xedd, ADDRINT ins_after_call_addr);
 /* ============================================================= */
 /* Service dump routines                                         */
 /* ============================================================= */
@@ -995,8 +995,11 @@ int add_created_inst_to_tc(xed_decoded_inst_t *xedd, ADDRINT inst_addr, bool cod
 	}
 	return 0;
 }
-int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
+int insert_inline_rtn(RTN rtn,ADDRINT caller_addr, ADDRINT ins_after_call_addr){
 	RTN_Open(rtn);
+	if (KnobVerbose) {
+		cerr << "Starting function inlining" << endl;
+	}	
 	cout<<"DEBUG: inlining routine: "<<RTN_Name(rtn)<<" Address: "<<RTN_Address(rtn)<<endl;
 	xed_decoded_inst_t xedd[2];
 	if(create_lea_inst(-8,&xedd[0]) < 0){
@@ -1041,6 +1044,26 @@ int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
 				return -1;
 			}
 		}
+		else if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
+			(INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
+			if(find(reorder_direct_jmps.begin(), reorder_direct_jmps.end(), INS_Address(ins)) != reorder_direct_jmps.end()){		
+				cout<<"Starting code reorder"<<endl;
+				if(reorder_rtn(rtn, ins, true, &xedd[1], ins_after_call_addr) < 0) {
+					cout<<"ERROR Failed to reorder RTN"<<endl;
+					RTN_Close(rtn);
+					return -1;
+				}
+				else {
+					cerr<<"Finished reordering RTN"<<endl;
+					RTN_Close(rtn);
+					return 0;
+				}
+				
+			}
+			else{
+				add_ins_to_tc(ins);			
+			}		
+		}
 		else{
 			add_ins_to_tc(ins);			
 		}
@@ -1053,8 +1076,31 @@ int insert_inline_rtn(RTN rtn,ADDRINT caller_addr){
 	RTN_Close(rtn);
 	return 0;
 }
-int reorder_rtn(RTN rtn,INS jmp_ins){
-	RTN_Open(rtn);
+int try_function_inline(INS ins, RTN rtn){
+	if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
+		if(find(hot_call_sites.begin(), hot_call_sites.end(), INS_Address(ins)) != hot_call_sites.end()){
+			ins_before_inline = ins;
+			ADDRINT call_target = INS_DirectControlFlowTargetAddress(ins);
+			if(find(inline_cand_rtns.begin(), inline_cand_rtns.end(), call_target) != inline_cand_rtns.end()){
+				RTN inline_rtn = RTN_FindByAddress(call_target);
+				RTN_Close( rtn );
+				if(insert_inline_rtn(inline_rtn,INS_Address(ins), INS_Address(INS_Next(ins)))<0){
+					cout<<"ERROR Failed to inline RTN"<<endl;
+				}
+				else{
+					cerr<<"Finished inlining RTN"<<endl;
+				}
+				RTN_Open( rtn );
+				return 0;
+			}
+		}
+	}
+	return -1;
+}
+int reorder_rtn(RTN rtn,INS jmp_ins, bool inside_inlined_rtn = false, xed_decoded_inst_t *xedd = NULL, ADDRINT ins_after_call_addr = 0){
+	if (KnobVerbose) {
+		cerr << "Starting code reordering" << endl;
+	}	
 	ADDRINT jmp_target = INS_DirectControlFlowTargetAddress(jmp_ins);
 	ADDRINT jmp_address = INS_Address(jmp_ins);
 	INS target_ins;
@@ -1068,43 +1114,65 @@ int reorder_rtn(RTN rtn,INS jmp_ins){
 	for(target_ins = jmp_ins; INS_Address(target_ins) < jmp_target ; target_ins = INS_Next(target_ins)){
 		continue;
 	}
-	ADDRINT target_translated_addr = 0;
+
 	for (INS ins = target_ins; INS_Valid(ins); ins = INS_Next(ins)){ // Translate the jmp target til the end of RTN
-		add_ins_to_tc(ins,true);
-		if(target_translated_addr == 0){
-			target_translated_addr = last_translated_inst_addr; // This is the TC address of the jmp target
+		// Recursive code reordering
+		if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
+			if(find(reorder_direct_jmps.begin(), reorder_direct_jmps.end(), INS_Address(ins)) != reorder_direct_jmps.end()){
+				if(reorder_rtn(rtn, ins) < 0) {
+					cout<<"ERROR Failed to reorder RTN"<<endl;
+				}
+				else {
+					cerr<<"Finished reordering RTN"<<endl;
+					break;
+				}
+			}		
 		}
+		// function inlining inside code reordering
+		if(try_function_inline(ins,rtn) == 0) continue;
+		if(inside_inlined_rtn && (INS_Address(ins) == INS_Address(RTN_InsTail(rtn)))){
+			if(add_created_inst_to_tc(xedd,INS_Address(RTN_InsTail(rtn))) < 0){
+				cout<<"Failed to add LEA 8(%rsp),%rsp"<<endl;
+				RTN_Close(rtn);
+				return -1;
+			}
+			xed_decoded_inst_t xedd_jump_inline; // This jump should replace the RET op
+			if(create_direct_jump_inst(0, &xedd_jump_inline, -1) < 0){ // The displacement is Dont-Care because we fix it later
+				cout<<"Failed to create jump inst"<<endl;
+				return -1;
+			}
+			if(add_created_inst_to_tc(&xedd_jump_inline,0, true) < 0){
+				cout<<"Failed to add jump"<<endl;
+				return -1;
+			}
+			instr_map[num_of_instr_map_entries-1].orig_targ_addr = ins_after_call_addr;
+			break;
+		}
+		add_ins_to_tc(ins,true);
 	}
 	cerr<<"Finished copying target"<<endl;
 	cerr<<"copying Fall Throught"<<endl;
-	ADDRINT new_rtn_tail_address = jmp_target;
 	for(INS ins = INS_Next(jmp_ins) ; INS_Address(ins) < jmp_target ; ins = INS_Next(ins)){ // Translate the jmp FT
-		if(INS_Address(INS_Next(ins)) != jmp_target)
-			new_rtn_tail_address += INS_Size(ins);
+		// function inlining inside code reordering
+		if(try_function_inline(ins,rtn) == 0) continue;
 		add_ins_to_tc(ins,true);
 	}
-	ADDRINT new_jmp_disp = new_rtn_tail_address - INS_Address(jmp_ins);
-	//if( new_jmp_disp > 0) cout<<"ERROR: new jump displacement is positive "<<dec<<new_jmp_disp<<endl;
-	xed_decoded_inst_t xedd;
-	ADDRINT new_jmp_address_in_tc = next_translated_inst_addr; // This is the address of the last jmp we are creating to jump back to the FT part
-	new_jmp_disp = new_jmp_address_in_tc - target_translated_addr;
-	if(create_direct_jump_inst(new_jmp_disp, &xedd, -1) < 0){
-		RTN_Close(rtn);
+	xed_decoded_inst_t xedd_jmp;
+	if(create_direct_jump_inst(0, &xedd_jmp, -1) < 0){ // The displacement is Dont-Care because we fix it later
 		cout<<"Failed to create jump inst"<<endl;
 		return -1;
 	}
-	if(add_created_inst_to_tc(&xedd,INS_Address(RTN_InsTail(rtn)), true) < 0){
+	if(add_created_inst_to_tc(&xedd_jmp,0, true) < 0){
 		cout<<"Failed to add jump"<<endl;
-		RTN_Close(rtn);
 		return -1;
 	}
 	instr_map[num_of_instr_map_entries-1].orig_targ_addr = INS_HasFallThrough(jmp_ins) ? jmp_address : jmp_target; 
-	RTN_Close(rtn);
 	return 0;
 }
 /*****************************************/
 /* find_candidate_rtns_for_translation() */
 /*****************************************/
+
 int find_candidate_rtns_for_translation(IMG img)
 {
     int rc;
@@ -1135,7 +1203,6 @@ int find_candidate_rtns_for_translation(IMG img)
 			// Open the RTN.
 			RTN_Open( rtn );              
 			INS rtn_head_ins = RTN_InsHead(rtn);
-			RTN_Close(rtn);
             for (INS ins = rtn_head_ins; INS_Valid(ins); ins = INS_Next(ins)) {
 
     			//debug print of orig instruction:
@@ -1145,34 +1212,11 @@ int find_candidate_rtns_for_translation(IMG img)
 					//xed_print_hex_line(reinterpret_cast<UINT8*>(INS_Address (ins)), INS_Size(ins));				   			
 				}
 				// Function Inlining	
-				if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
-					if(find(hot_call_sites.begin(), hot_call_sites.end(), INS_Address(ins)) != hot_call_sites.end()){
-						cerr<<"Next INS is going to be: "<<INS_Address(INS_Next(ins))<<endl;
-						ins_before_inline = ins;
-						ADDRINT call_target = INS_DirectControlFlowTargetAddress(ins);
-						if(find(inline_cand_rtns.begin(), inline_cand_rtns.end(), call_target) != inline_cand_rtns.end()){
-							RTN inline_rtn = RTN_FindByAddress(call_target);
-							cerr<<"inlining in RTN: "<<RTN_Name(rtn)<<endl;
-							//RTN_Close( rtn ); // closing current routine to work on the inline routine
-							if(insert_inline_rtn(inline_rtn,INS_Address(ins))<0){
-								cout<<"ERROR Failed to inline RTN"<<endl;
-							}
-							cerr<<"Finished inlining RTN"<<endl;
-							//RTN_Open( rtn );
-							cerr<<"Next INS is going to be: "<<INS_Address(INS_Next(ins))<<endl;
-							ins = ins_before_inline;
-							cerr<<"Fixed to : "<<INS_Address(INS_Next(ins))<<endl;
-							continue;
-						}
-					}
-				}
+				if(try_function_inline(ins,rtn) == 0) continue;
 				// Code Reordering
 				if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
 				  (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
-					if(find(reorder_direct_jmps.begin(), reorder_direct_jmps.end(), INS_Address(ins)) != reorder_direct_jmps.end()){
-						if (KnobVerbose) {
-							cerr << "Starting code reordering" << endl;
-						}			
+					if(find(reorder_direct_jmps.begin(), reorder_direct_jmps.end(), INS_Address(ins)) != reorder_direct_jmps.end()){		
 						if(reorder_rtn(rtn, ins) < 0) {
 							cout<<"ERROR Failed to reorder RTN"<<endl;
 						}
@@ -1214,7 +1258,7 @@ int find_candidate_rtns_for_translation(IMG img)
 
 
 			// Close the RTN.
-			//RTN_Close( rtn );
+			RTN_Close( rtn );
 
 			translated_rtn_num++;
 
