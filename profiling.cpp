@@ -8,11 +8,11 @@
 #define MAX_RTNS 1000
 #define MAX_LOOPS 10000
 #define MAX_DIRECT_JMPS 10000
-#define MAX_CODE_REORDER_JMPS 10
-#define MAX_INLINE_RTNS 10
+#define MAX_CODE_REORDER_JMPS 30
+#define MAX_INLINE_RTNS 15
 #define HOT_RTNS_TO_OPT 5
 #define TAKEN_THRESHOLD 0.75
-#define TARGET_DIFF_THRESHOLD 100
+#define TARGET_DIFF_THRESHOLD 200
 #define EXEC_COUNT_THRESHOLD 100
 using namespace std;
 typedef struct routine{
@@ -48,35 +48,31 @@ typedef struct loop_print{
     int routine_icount;
     int routine_calls;
 }loop_print_t;
-typedef struct instruction{
-    ADDRINT inst_addr;
-    ADDRINT inst_target;
-    bool is_branch;
-} instruction_t;
 typedef struct call_site{
     ADDRINT caller_addr;
     ADDRINT caller_rtn_addr;
     UINT64 count_calls;
 } call_site_t;
-typedef struct direct_forward_jmp{
+typedef struct forward_jmp{
     ADDRINT rtn_address;
     ADDRINT address;
     UINT64 exec_count;
     bool is_cond_br;
     UINT64 taken_count;
-} direct_forward_jmp_t;
+    UINT64 offset;
+} forward_jmp_t;
 
 
 unordered_map<ADDRINT,loop_t> loops; // will hold loop info
 unordered_map<ADDRINT,routine_t> normal_routines; // will hold normal routine info
 unordered_map<ADDRINT,routine_t> inline_cand_routines; // will hold inlining candidate routine info
 unordered_map<ADDRINT,unordered_map<ADDRINT,call_site_t>> callee_map; // for each rtns, will hold the rtns that call it and how many times
-unordered_map<ADDRINT,direct_forward_jmp_t> direct_forward_jmps;
+unordered_map<ADDRINT,forward_jmp_t> forward_jmps;
 vector<call_site_t> hot_rtns_vec;
 vector<ADDRINT> rtns_to_translate;
 routine_t inline_routines_arr[MAX_RTNS]; //for sorting & exporting purposes
 routine_t normal_routines_arr[MAX_RTNS]; //for sorting & exporting purposes
-direct_forward_jmp_t direct_forward_jmps_arr[MAX_DIRECT_JMPS];
+forward_jmp_t forward_jmps_arr[MAX_DIRECT_JMPS];
 int num_of_inline_rtns;
 int num_of_normal_rtns;
 
@@ -85,54 +81,23 @@ bool rtn_is_valid_for_translation(INS ins, RTN rtn){
     if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
         ADDRINT target_addr = INS_DirectControlFlowTargetAddress(ins);
         if(target_addr == RTN_Address(rtn)){
-            cout<<"DEBUG: INS is recursive call to RTN"<<endl;
+            //cout<<"DEBUG: INS is recursive call to RTN"<<endl;
             return false; // recursive rtn 
         }
     }
     string rtn_name = RTN_Name(rtn);
     if(rtn_name.find("plt") != std::string::npos) return false;
     if(rtn_name.find("bs") != std::string::npos) return false;
-
-    // xed_decoded_inst_t xedd;
-    // xed_state_t state;
-	// xed_state_zero(&state);
-	// state.stack_addr_width=XED_ADDRESS_WIDTH_64b;
-    // state.mmode=XED_MACHINE_MODE_LONG_64;
-    // xed_decoded_inst_zero_set_mode(&xedd, &state);
-    // xed_error_enum_t xed_code = xed_decode(&xedd, reinterpret_cast<UINT8*>(INS_Address(ins)), XED_MAX_INSTRUCTION_BYTES);
-    // if (xed_code != XED_ERROR_NONE) {
-    //     cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << INS_Address(ins) << endl;
-    //     return false;
-    // }
-	// unsigned int memops = xed_decoded_inst_number_of_memory_operands(&xedd);
-
-	// //cerr << "Memory Operands" << endl;
-	// xed_reg_enum_t base_reg = XED_REG_INVALID;
-	// xed_int64_t disp = 0;
-	// for(unsigned int i=0; i < memops ; i++)   {
-	// 	base_reg = xed_decoded_inst_get_base_reg(&xedd,i);
-	// 	disp = xed_decoded_inst_get_memory_displacement(&xedd,i);
-    //     if(INS_IsMemoryRead(ins) && (base_reg == XED_REG_RIP)){
-    //         ADDRINT memory_target = INS_Address(ins) + INS_Size(ins) + disp;
-    //         if((memory_target > INS_Address(RTN_InsTail(rtn))) || (memory_target < INS_Address(RTN_InsHead(rtn)))){
-    //             cout<<"DEBUG: INS is MOV outside the scope of the RTN"<<endl;
-    //             cout<<INS_Disassemble(ins)<<endl;
-    //             return false;
-    //         }
-    //         //Check if the displacement is out of the function scope
-    //     }
-    // }
-
     return true;
 }
 bool ins_is_valid_for_inline(INS ins, RTN rtn){
     if(INS_IsDirectBranch(ins)){
         ADDRINT target = INS_DirectControlFlowTargetAddress(ins);
         if((target > INS_Address(RTN_InsTail(rtn))) || (target < INS_Address(RTN_InsHead(rtn)))){
-            cout<<"DEBUG: INS is JMP to outside of RTN scope"<<endl;
-            cout<<INS_Disassemble(ins)<<endl;
-            cout<<"RTN Head: "<<INS_Address(RTN_InsHead(rtn))<<endl;
-            cout<<"RTN Tail: "<<INS_Address(RTN_InsTail(rtn))<<endl;
+            // cout<<"DEBUG: INS is JMP to outside of RTN scope"<<endl;
+            // cout<<INS_Disassemble(ins)<<endl;
+            // cout<<"RTN Head: "<<INS_Address(RTN_InsHead(rtn))<<endl;
+            // cout<<"RTN Tail: "<<INS_Address(RTN_InsTail(rtn))<<endl;
             return false;
         }
     }
@@ -159,13 +124,13 @@ bool ins_is_valid_for_inline(INS ins, RTN rtn){
         bool disp_positive = (disp > 0);
         if(INS_IsLea(ins) || INS_IsMov(ins)){
             if ((base_reg == XED_REG_RSP) && !disp_positive) {
-                cout<<"DEBUG: INS has negative disp from RSP"<<endl;
-                cout<<INS_Disassemble(ins)<<endl;
+                //cout<<"DEBUG: INS has negative disp from RSP"<<endl;
+                //cout<<INS_Disassemble(ins)<<endl;
                 return false;
             }
             if ((base_reg == XED_REG_RBP) && disp_positive) {
-                cout<<"DEBUG: INS has positive disp from RBP"<<endl;
-                cout<<INS_Disassemble(ins)<<endl;
+                // cout<<"DEBUG: INS has positive disp from RBP"<<endl;
+                // cout<<INS_Disassemble(ins)<<endl;
                 return false;
             }
         }
@@ -173,14 +138,14 @@ bool ins_is_valid_for_inline(INS ins, RTN rtn){
             if(base_reg == XED_REG_RIP){
                 ADDRINT target = INS_Address(ins) + INS_Size(ins) + disp;
                 if((target > INS_Address(RTN_InsTail(rtn))) || (target < INS_Address(RTN_InsHead(rtn)))){
-                    cout<<"DEBUG: INS is Indir Jump outside the scope of the RTN"<<endl;
-                    cout<<INS_Disassemble(ins)<<endl;
+                    // cout<<"DEBUG: INS is Indir Jump outside the scope of the RTN"<<endl;
+                    // cout<<INS_Disassemble(ins)<<endl;
                     return false;
                 }
             }
             else{
-                cout<<"DEBUG: INS is Indir Jump"<<endl;
-                cout<<INS_Disassemble(ins)<<endl;
+                // cout<<"DEBUG: INS is Indir Jump"<<endl;
+                // cout<<INS_Disassemble(ins)<<endl;
                 return false;
             }
         }
@@ -202,23 +167,6 @@ void Routine(RTN rtn, void *v){
         RTN_Close(rtn);
         return;
     }
-    //ADDRINT rtn_tail_addr = INS_Address(RTN_InsTail(rtn));
-    // Save routine instructions & insert counter increments
-    // vector<instruction_t> rtn_instructions;
-    // for(INS ins = RTN_InsHead(rtn) ; ins != INS_Invalid() ; ins = INS_Next(ins)){
-    //     instruction_t instruction;
-    //     instruction.inst_addr = INS_Address(ins);
-    //     instruction.inst_target = 0;
-    //     instruction.is_branch = false;
-    //     if(INS_IsDirectControlFlow(ins) && !INS_IsCall(ins)){
-    //         instruction.inst_target = INS_DirectControlFlowTargetAddress(ins);
-    //         instruction.is_branch = true;
-    //     }
-    //     rtn_instructions.push_back(instruction);
-
-    // }
-    //
-
 
     // Check if the routine is a good candidate for inlining
     // Candidate for inlining: routine with only 1 RET at the end. (meaning no RET or CALL in the middle of the routine)
@@ -249,7 +197,7 @@ void Routine(RTN rtn, void *v){
     if(candidate_for_inline && INS_IsRet(RTN_InsTail(rtn))){ // Last instruction is RET
         num_of_inline_rtns++;
         inline_cand_routines[rtn_addr] = routine;
-        cout<<"Debug: INLINE RTN "<<RTN_Name(rtn)<<endl;
+        //cout<<"Debug: INLINE RTN "<<RTN_Name(rtn)<<endl;
         INS_InsertCall(RTN_InsHead(rtn), IPOINT_BEFORE, (AFUNPTR)do_rtn_count,
                                             IARG_PTR,
                                             &(inline_cand_routines[rtn_addr].icount),
@@ -266,7 +214,7 @@ void Routine(RTN rtn, void *v){
     else{
         num_of_normal_rtns++;
         normal_routines[rtn_addr] = routine;
-        cout<<"Debug: Normal RTN"<<RTN_Name(rtn)<<endl;
+        //cout<<"Debug: Normal RTN"<<RTN_Name(rtn)<<endl;
         INS_InsertCall(RTN_InsHead(rtn), IPOINT_BEFORE, (AFUNPTR)do_rtn_count,
                                             IARG_PTR,
                                             &(normal_routines[rtn_addr].icount),
@@ -288,14 +236,75 @@ void Routine(RTN rtn, void *v){
 }
 // end of RTN handle
 
-void do_call_count(int *call_count){ (*call_count)++; }
+// TRACE handle
 void do_uncond_jmp_count(UINT64 *jmp_count){ (*jmp_count)++; }
-void do_cond_jmp_count(INT32 taken, direct_forward_jmp_t *cond_jmp){
+void do_cond_jmp_count(INT32 taken, forward_jmp_t *cond_jmp){
     cond_jmp->exec_count++;
     if(taken){
         cond_jmp->taken_count++;
     }
 }
+void Trace(TRACE trace, void *v){
+    for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)){
+		INS bbl_tail = BBL_InsTail(bbl);
+		if(INS_IsDirectControlFlow(bbl_tail) && !INS_IsCall(bbl_tail)){ // tail is a branch
+			ADDRINT ins_addr = INS_Address(bbl_tail);
+			RTN rtn = RTN_FindByAddress(ins_addr);
+			if(RTN_Valid(rtn) == false)
+				continue;
+			
+			ADDRINT rtn_addr = RTN_Address(rtn);
+			ADDRINT ins_target = INS_DirectControlFlowTargetAddress(bbl_tail);
+			if((normal_routines.find(rtn_addr) == normal_routines.end()) && (inline_cand_routines.find(rtn_addr) == inline_cand_routines.end())) continue;
+			if(ins_target > ins_addr){ // The branch target is "below" in the code forward jump
+                if((ins_target - ins_addr) < TARGET_DIFF_THRESHOLD) continue;
+                if(forward_jmps.find(ins_addr) == forward_jmps.end()){
+                    if(INS_HasFallThrough(bbl_tail)){
+                        INS_InsertCall(bbl_tail, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
+                                                IARG_BRANCH_TAKEN,
+                                                IARG_PTR,
+                                                &(forward_jmps[ins_addr]),
+                                                IARG_END);
+                    }
+                    else{
+                        INS_InsertCall(bbl_tail, IPOINT_BEFORE, (AFUNPTR)do_uncond_jmp_count,
+                                                IARG_PTR,
+                                                &(forward_jmps[ins_addr].exec_count),
+                                                IARG_END);
+                    }
+                }
+                 else{
+                    forward_jmp_t forward_jmp;
+                    forward_jmp.address = ins_addr;
+                    forward_jmp.rtn_address = rtn_addr;
+                    forward_jmp.exec_count = 0;
+                    forward_jmp.is_cond_br = false;
+                    forward_jmp.taken_count = 0;
+                    forward_jmp.offset = ins_target - ins_addr;
+                    forward_jmps[ins_addr] = forward_jmp;
+                    if(INS_HasFallThrough(bbl_tail)){
+                        forward_jmps[ins_addr].is_cond_br = true;
+                        INS_InsertCall(bbl_tail, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
+                                                IARG_BRANCH_TAKEN,
+                                                IARG_PTR,
+                                                &(forward_jmps[ins_addr]),
+                                                IARG_END);
+                    }
+                    else{
+                        INS_InsertCall(bbl_tail, IPOINT_BEFORE, (AFUNPTR)do_uncond_jmp_count,
+                                                IARG_PTR,
+                                                &(forward_jmps[ins_addr].exec_count),
+                                                IARG_END);
+                    } 
+                }
+            }
+        }
+	}
+}
+//end of TRACE handle
+
+// INST handle
+void do_call_count(int *call_count){ (*call_count)++; }
 void Instruction(INS ins, void *v){
     RTN rtn = RTN_FindByAddress(INS_Address(ins));
     if((normal_routines.find(RTN_Address(rtn)) == normal_routines.end()) && (inline_cand_routines.find(RTN_Address(rtn)) == inline_cand_routines.end())) return;
@@ -314,51 +323,53 @@ void Instruction(INS ins, void *v){
                                     &(callee_map[target_addr][ins_addr].count_calls),
                                     IARG_END);
     }
-    if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
+    /*if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
         (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
         ADDRINT ins_addr = INS_Address(ins);
         if((INS_DirectControlFlowTargetAddress(ins) - INS_Address(ins)) < TARGET_DIFF_THRESHOLD) return;
-        if(direct_forward_jmps.find(ins_addr) == direct_forward_jmps.end()){
+        if(forward_jmps.find(ins_addr) == forward_jmps.end()){
             if(INS_HasFallThrough(ins)){
                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
                                         IARG_BRANCH_TAKEN,
                                         IARG_PTR,
-                                        &(direct_forward_jmps[ins_addr]),
+                                        &(forward_jmps[ins_addr]),
                                         IARG_END);
             }
             else{
                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_uncond_jmp_count,
                                         IARG_PTR,
-                                        &(direct_forward_jmps[ins_addr].exec_count),
+                                        &(forward_jmps[ins_addr].exec_count),
                                         IARG_END);
             }
         }
         else{
-            direct_forward_jmp_t forward_jmp;
+            forward_jmp_t forward_jmp;
             forward_jmp.address = ins_addr;
             forward_jmp.rtn_address = RTN_Address(RTN_FindByAddress(ins_addr));
             forward_jmp.exec_count = 0;
             forward_jmp.is_cond_br = false;
             forward_jmp.taken_count = 0;
-            direct_forward_jmps[ins_addr] = forward_jmp;
+            forward_jmps[ins_addr] = forward_jmp;
             if(INS_HasFallThrough(ins)){
-                direct_forward_jmps[ins_addr].is_cond_br = true;
+                forward_jmps[ins_addr].is_cond_br = true;
                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
                                         IARG_BRANCH_TAKEN,
                                         IARG_PTR,
-                                        &(direct_forward_jmps[ins_addr]),
+                                        &(forward_jmps[ins_addr]),
                                         IARG_END);
             }
             else{
                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_uncond_jmp_count,
                                         IARG_PTR,
-                                        &(direct_forward_jmps[ins_addr].exec_count),
+                                        &(forward_jmps[ins_addr].exec_count),
                                         IARG_END);
             }
             
         }
-    }
+    }*/
 }
+// end of INST handle
+
 // Sort and write RTNs to CSV
 int compare_inline_rtn(const void * a, const void * b){
     routine_t *rtn1 = (routine_t*)a;
@@ -393,17 +404,17 @@ void sort_normal_routines(unordered_map<ADDRINT,routine_t> &routines, routine_t 
     qsort(routines_arr,MAX_RTNS,sizeof(routine_t),compare_normal_rtn);
 }
 int compare_forward_jmps(const void * a, const void * b){
-    direct_forward_jmp_t *jmp1 = (direct_forward_jmp_t*)a;
-    direct_forward_jmp_t *jmp2 = (direct_forward_jmp_t*)b;
+    forward_jmp_t *jmp1 = (forward_jmp_t*)a;
+    forward_jmp_t *jmp2 = (forward_jmp_t*)b;
     if(jmp1->exec_count > jmp2->exec_count) return -1;
     else if(jmp1->exec_count == jmp2->exec_count) return 0;
     return 1;
 }
-void sort_forward_jmps(unordered_map<ADDRINT,direct_forward_jmp_t> &forward_jmps, direct_forward_jmp_t *forward_jmps_arr)
+void sort_forward_jmps(unordered_map<ADDRINT,forward_jmp_t> &forward_jmps, forward_jmp_t *forward_jmps_arr)
 {
     int idx= 0;
     for (const auto& info : forward_jmps) {
-        direct_forward_jmp_t cur_jmp = info.second;
+        forward_jmp_t cur_jmp = info.second;
         if(cur_jmp.exec_count < EXEC_COUNT_THRESHOLD) continue;
         if(cur_jmp.is_cond_br){
             double taken_rate = cur_jmp.taken_count / cur_jmp.exec_count;
@@ -412,7 +423,7 @@ void sort_forward_jmps(unordered_map<ADDRINT,direct_forward_jmp_t> &forward_jmps
         forward_jmps_arr[idx] = info.second;
         idx++;
     }
-    qsort(forward_jmps_arr,MAX_DIRECT_JMPS,sizeof(direct_forward_jmp_t),compare_forward_jmps);
+    qsort(forward_jmps_arr,MAX_DIRECT_JMPS,sizeof(forward_jmp_t),compare_forward_jmps);
 }
 bool rtn_in_hot_rtns(ADDRINT rtn_addr){
     for(unsigned i = 0 ; i< hot_rtns_vec.size() ; i++){
@@ -431,29 +442,15 @@ void write_csv(const string& filename) {
     int normal_rtns_count = 0;
     int inline_rtns_count = 0;
     int code_reorder_jmps_count = 0;
+    // RTNS to translate
     for (int i = 0; i < MAX_RTNS; i++) {
         if(normal_rtns_count >= HOT_RTNS_TO_OPT) break;
         if(normal_routines_arr[i].hot_call_site_count == 0) break;
         if(normal_routines_arr[i].icount == 0) continue;
         if(normal_routines_arr[i].rcount == 0) continue;
-        // if(normal_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(!rtn_in_hot_rtns(normal_routines_arr[i].address)) continue;
         rtns_to_translate.push_back(normal_routines_arr[i].address);
         normal_rtns_count++;
-    }
-    for (int i = 0; i < MAX_INLINE_RTNS; i++) {
-        if(inline_routines_arr[i].icount == 0) continue;
-        if(inline_routines_arr[i].rcount == 0) break;
-        // if(inline_routines_arr[i].name.find("plt") != std::string::npos) continue;
-        if(inline_routines_arr[i].hot_call_site == 0) continue;
-        if(inline_routines_arr[i].valid == false) continue;
-        inline_rtns_count++;
-    }
-    for (int i = 0; i < MAX_DIRECT_JMPS; i++) {
-        if(code_reorder_jmps_count >= MAX_CODE_REORDER_JMPS) break;
-        if(direct_forward_jmps_arr[i].exec_count == 0) break;
-        if(find(rtns_to_translate.begin(), rtns_to_translate.end(), direct_forward_jmps_arr[i].rtn_address) == rtns_to_translate.end()) continue;
-        code_reorder_jmps_count++;
     }
     ofs << "normal_rtns,"<<normal_rtns_count<<"\n";
     ofs << "img_name,img_address,rtn_name,rtn_address,instruction_count,invoke_count,hot_call_site_calls\n";
@@ -462,7 +459,6 @@ void write_csv(const string& filename) {
         if(idx >= HOT_RTNS_TO_OPT) break;
         if(normal_routines_arr[i].icount == 0) continue;
         if(normal_routines_arr[i].rcount == 0) break;
-        // if(normal_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(!rtn_in_hot_rtns(normal_routines_arr[i].address)) continue;
         all_translated_rtns.push_back(normal_routines_arr[i].address);
         idx++;
@@ -471,14 +467,25 @@ void write_csv(const string& filename) {
             << dec << normal_routines_arr[i].icount << "," << normal_routines_arr[i].rcount << ","
             << dec << normal_routines_arr[i].hot_call_site_count <<"\n";
     }
+    // end of RTNS to translate
+
+    // RTNS to inline
+    for (int i = 0; i < MAX_INLINE_RTNS; i++) {
+        if(inline_routines_arr[i].icount == 0) continue;
+        if(inline_routines_arr[i].rcount == 0) break;
+        if(inline_routines_arr[i].hot_call_site == 0) continue;
+        if(inline_routines_arr[i].valid == false) continue;
+        if(find(rtns_to_translate.begin(), rtns_to_translate.end(), inline_routines_arr[i].hot_call_site_rtn) == rtns_to_translate.end()) continue;
+        inline_rtns_count++;
+    }
     ofs << "inline_rtns, "<<inline_rtns_count<<"\n";
     ofs << "img_name,img_address,rtn_name,rtn_address,instruction_count,invoke_count,hot_call_site,caller_rtn,calls\n";
     for (int i = 0; i < MAX_INLINE_RTNS; i++) {
         if(inline_routines_arr[i].icount == 0) continue;
         if(inline_routines_arr[i].rcount == 0) break;
-        // if(inline_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(inline_routines_arr[i].hot_call_site == 0) continue;
         if(inline_routines_arr[i].valid == false) continue;
+        if(find(rtns_to_translate.begin(), rtns_to_translate.end(), inline_routines_arr[i].hot_call_site_rtn) == rtns_to_translate.end()) continue;
         all_translated_rtns.push_back(inline_routines_arr[i].address);
         ofs << inline_routines_arr[i].img_name << ",0x" << hex << inline_routines_arr[i].img_address << ","
             << inline_routines_arr[i].name << ",0x" << hex << inline_routines_arr[i].address << ","
@@ -487,21 +494,32 @@ void write_csv(const string& filename) {
             << hex << inline_routines_arr[i].hot_call_site_rtn << ","
             << dec << inline_routines_arr[i].hot_call_site_count <<"\n";
     }
-    
+    // end of RTNS to inline
+
+    // Code Reordering INSTS
+    for (int i = 0; i < MAX_DIRECT_JMPS; i++) {
+        if(code_reorder_jmps_count >= MAX_CODE_REORDER_JMPS) break;
+        if(forward_jmps_arr[i].exec_count == 0) break;
+        if(find(all_translated_rtns.begin(), all_translated_rtns.end(), forward_jmps_arr[i].rtn_address) == all_translated_rtns.end()) continue;
+        code_reorder_jmps_count++;
+    }
+
     ofs << "code_reorder_jmps_count, "<<code_reorder_jmps_count<<"\n";
-    ofs << "jmp_address,jmp_rtn_address,exec_count,taken_count,is_cond_br\n";
+    ofs << "jmp_address,jmp_rtn_address,exec_count,taken_count,is_cond_br,offset\n";
     idx = 0;
     for (int i = 0; i < MAX_DIRECT_JMPS; i++) {
         if(idx >= MAX_CODE_REORDER_JMPS) break;
-        if(direct_forward_jmps_arr[i].exec_count == 0) break;
-        if(find(all_translated_rtns.begin(), all_translated_rtns.end(), direct_forward_jmps_arr[i].rtn_address) == all_translated_rtns.end()) continue;
+        if(forward_jmps_arr[i].exec_count == 0) break;
+        if(find(all_translated_rtns.begin(), all_translated_rtns.end(), forward_jmps_arr[i].rtn_address) == all_translated_rtns.end()) continue;
         idx++;
-        ofs << "0x" << hex << direct_forward_jmps_arr[i].address << ",0x" 
-            << hex << direct_forward_jmps_arr[i].rtn_address << ", "
-            << dec << direct_forward_jmps_arr[i].exec_count << ", "
-            << dec << direct_forward_jmps_arr[i].taken_count << ", "
-            << dec << direct_forward_jmps_arr[i].is_cond_br << "\n";
+        ofs << "0x" << hex << forward_jmps_arr[i].address << ",0x" 
+            << hex << forward_jmps_arr[i].rtn_address << ", "
+            << dec << forward_jmps_arr[i].exec_count << ", "
+            << dec << forward_jmps_arr[i].taken_count << ", "
+            << dec << forward_jmps_arr[i].is_cond_br << ", "
+            << dec << forward_jmps_arr[i].offset << "\n";
     }
+    // end of Code Reordering INSTS
     ofs.close();
 }
 call_site_t get_hot_call_site(ADDRINT callee_addr){
@@ -559,7 +577,7 @@ void Fini(INT32 code, void *v){
     normal_routines.insert(inline_cand_routines.begin(),inline_cand_routines.end());
     create_hot_rtns_vec();
     sort_normal_routines(normal_routines, normal_routines_arr);
-    sort_forward_jmps(direct_forward_jmps,direct_forward_jmps_arr);
+    sort_forward_jmps(forward_jmps,forward_jmps_arr);
     write_csv("rtn-count.csv");
 }
 // END of FINI
@@ -568,10 +586,11 @@ int profiling()
 {
     memset(inline_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
     memset(normal_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
-    memset(direct_forward_jmps_arr,0,sizeof(direct_forward_jmp_t)*MAX_DIRECT_JMPS);
+    memset(forward_jmps_arr,0,sizeof(forward_jmp_t)*MAX_DIRECT_JMPS);
     num_of_inline_rtns = 0;
     num_of_normal_rtns = 0;
     RTN_AddInstrumentFunction(Routine,0);
+    TRACE_AddInstrumentFunction(Trace, 0);
     INS_AddInstrumentFunction(Instruction,0);
     PIN_AddFiniFunction(Fini,0);
     PIN_StartProgram();
