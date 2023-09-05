@@ -11,9 +11,10 @@
 #define MAX_CODE_REORDER_JMPS 30
 #define MAX_INLINE_RTNS 15
 #define HOT_RTNS_TO_OPT 5
-#define TAKEN_THRESHOLD 0.75
+#define TAKEN_THRESHOLD 0.6
 #define TARGET_DIFF_THRESHOLD 200
-#define EXEC_COUNT_THRESHOLD 100
+#define EXEC_COUNT_THRESHOLD 3
+#define HOT_CALL_SITE_THRESHOLD 0.9
 using namespace std;
 typedef struct routine{
     string name;
@@ -27,27 +28,27 @@ typedef struct routine{
     UINT64 hot_call_site_count;
     bool valid;
 } routine_t;
-typedef struct loop{
-    int count_seen;
-    int count_loop_invoked;
-    ADDRINT rtn_addr;
-    //For Diff Count Claculations
-    bool first_invoke;
-    int last_invocation_iterations;
-    int current_invocation_iterations;
-    int diff_count;
-} loop_t;
-typedef struct loop_print{
-    ADDRINT loop_target_addr;
-    int count_seen;
-    int count_loop_invoked;
-    double mean_taken;
-    int diff_count;
-    string routine_name;
-    ADDRINT routine_addr;
-    int routine_icount;
-    int routine_calls;
-}loop_print_t;
+// typedef struct loop{
+//     int count_seen;
+//     int count_loop_invoked;
+//     ADDRINT rtn_addr;
+//     //For Diff Count Claculations
+//     bool first_invoke;
+//     int last_invocation_iterations;
+//     int current_invocation_iterations;
+//     int diff_count;
+// } loop_t;
+// typedef struct loop_print{
+//     ADDRINT loop_target_addr;
+//     int count_seen;
+//     int count_loop_invoked;
+//     double mean_taken;
+//     int diff_count;
+//     string routine_name;
+//     ADDRINT routine_addr;
+//     int routine_icount;
+//     int routine_calls;
+// }loop_print_t;
 typedef struct call_site{
     ADDRINT caller_addr;
     ADDRINT caller_rtn_addr;
@@ -63,7 +64,7 @@ typedef struct forward_jmp{
 } forward_jmp_t;
 
 
-unordered_map<ADDRINT,loop_t> loops; // will hold loop info
+//unordered_map<ADDRINT,loop_t> loops; // will hold loop info
 unordered_map<ADDRINT,routine_t> normal_routines; // will hold normal routine info
 unordered_map<ADDRINT,routine_t> inline_cand_routines; // will hold inlining candidate routine info
 unordered_map<ADDRINT,unordered_map<ADDRINT,call_site_t>> callee_map; // for each rtns, will hold the rtns that call it and how many times
@@ -87,7 +88,7 @@ bool rtn_is_valid_for_translation(INS ins, RTN rtn){
     }
     string rtn_name = RTN_Name(rtn);
     if(rtn_name.find("plt") != std::string::npos) return false;
-    if(rtn_name.find("bs") != std::string::npos) return false;
+    //if(rtn_name.find("bs") != std::string::npos) return false;
     return true;
 }
 bool ins_is_valid_for_inline(INS ins, RTN rtn){
@@ -157,6 +158,7 @@ void do_rtn_count(int *icount, int *rcount){
     (*icount)++;
     (*rcount)++;
 }
+void do_call_count(int *call_count){ (*call_count)++; }
 void Routine(RTN rtn, void *v){
     if(RTN_Valid(rtn) == false)
 		return;
@@ -299,12 +301,26 @@ void Trace(TRACE trace, void *v){
                 }
             }
         }
-	}
+        else if(INS_IsDirectControlFlow(bbl_tail) && INS_IsCall(bbl_tail)){
+            ADDRINT target_addr = INS_DirectControlFlowTargetAddress(bbl_tail);
+            ADDRINT ins_addr = INS_Address(bbl_tail);
+            if(target_addr == RTN_Address(RTN_FindByAddress(ins_addr))) continue; // recursive rtn
+            if(callee_map.find(target_addr) == callee_map.end()){
+                callee_map[target_addr][ins_addr] = {ins_addr , RTN_Address(RTN_FindByAddress(ins_addr)), 0};
+            }
+            else if(callee_map[target_addr].find(ins_addr) == callee_map[target_addr].end()){
+                callee_map[target_addr][ins_addr] = {ins_addr , RTN_Address(RTN_FindByAddress(ins_addr)), 0};
+            }
+            INS_InsertCall(bbl_tail, IPOINT_BEFORE, (AFUNPTR)do_call_count,
+                                        IARG_PTR,
+                                        &(callee_map[target_addr][ins_addr].count_calls),
+                                        IARG_END);
+        }
+    }
 }
 //end of TRACE handle
 
 // INST handle
-void do_call_count(int *call_count){ (*call_count)++; }
 void Instruction(INS ins, void *v){
     RTN rtn = RTN_FindByAddress(INS_Address(ins));
     if((normal_routines.find(RTN_Address(rtn)) == normal_routines.end()) && (inline_cand_routines.find(RTN_Address(rtn)) == inline_cand_routines.end())) return;
@@ -323,7 +339,7 @@ void Instruction(INS ins, void *v){
                                     &(callee_map[target_addr][ins_addr].count_calls),
                                     IARG_END);
     }
-    /*if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
+    if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
         (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
         ADDRINT ins_addr = INS_Address(ins);
         if((INS_DirectControlFlowTargetAddress(ins) - INS_Address(ins)) < TARGET_DIFF_THRESHOLD) return;
@@ -366,7 +382,7 @@ void Instruction(INS ins, void *v){
             }
             
         }
-    }*/
+    }
 }
 // end of INST handle
 
@@ -522,18 +538,24 @@ void write_csv(const string& filename) {
     // end of Code Reordering INSTS
     ofs.close();
 }
-call_site_t get_hot_call_site(ADDRINT callee_addr){
+call_site_t get_hot_call_site(ADDRINT callee_addr, UINT64 calee_exec_count){
     //cout<<"Callee: "<<hex<<callee_addr<<endl;
     unordered_map<ADDRINT,call_site_t> callers = callee_map[callee_addr];
     ADDRINT hot_call_site = 0;
     UINT64 hot_call_site_calls = 0;
+    call_site_t error = {0,0,0};
     for (const auto& caller : callers) {
-        //cout<<"Caller: "<<hex<<caller.first<<" Calls: "<<dec<<caller.second<<endl;
         if(caller.second.count_calls > hot_call_site_calls) {
             hot_call_site_calls = caller.second.count_calls;
             hot_call_site = caller.second.caller_addr;
         }
     }
+    double hot_call_site_strength = (double)hot_call_site_calls / calee_exec_count;
+    cout<<"Inline RTN: "<<callee_addr<<" Hot Call Site Strength : ";
+    cout << fixed << setprecision(2);
+    cout<<hot_call_site_strength<<endl;
+    if(hot_call_site_strength < HOT_CALL_SITE_THRESHOLD)
+        return error;
     return callers[hot_call_site];
 }
 void mark_as_invalid_for_inline(ADDRINT rtn_addr){
@@ -550,9 +572,9 @@ void create_hot_rtns_vec(){
     for (int i = 0; i < MAX_INLINE_RTNS; i++) {
         if(inline_routines_arr[i].icount == 0) continue;
         if(inline_routines_arr[i].rcount == 0) break;
-        // if(inline_routines_arr[i].name.find("plt") != std::string::npos) continue;
         if(inline_routines_arr[i].valid == false) continue;
-        call_site_t call_site = get_hot_call_site(inline_routines_arr[i].address);
+        call_site_t call_site = get_hot_call_site(inline_routines_arr[i].address, inline_routines_arr[i].rcount);
+        if(call_site.caller_addr == 0) continue;
         inline_routines_arr[i].hot_call_site = call_site.caller_addr;
         inline_routines_arr[i].hot_call_site_rtn = call_site.caller_rtn_addr;
         inline_routines_arr[i].hot_call_site_count = call_site.count_calls;
@@ -564,9 +586,6 @@ void create_hot_rtns_vec(){
         normal_routines[caller_rtn_addr].hot_call_site_count = call_site.count_calls;
         mark_as_invalid_for_inline(caller_rtn_addr);
     }
-    // for (unsigned i = 0; i <hot_rtns_vec.size(); i++) {
-    //     cout<<"hot_rtns_vec callers "<<i<<" = "<<hot_rtns_vec[i].caller_addr<<endl;
-    // }
 }
 //
 
@@ -591,7 +610,7 @@ int profiling()
     num_of_normal_rtns = 0;
     RTN_AddInstrumentFunction(Routine,0);
     TRACE_AddInstrumentFunction(Trace, 0);
-    INS_AddInstrumentFunction(Instruction,0);
+    //INS_AddInstrumentFunction(Instruction,0);
     PIN_AddFiniFunction(Fini,0);
     PIN_StartProgram();
     return 0;
