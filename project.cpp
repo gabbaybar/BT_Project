@@ -78,7 +78,7 @@ void get_data_from_csv(){
         inline_cand_rtns.push_back(rtn_addr); 
 
         ADDRINT call_site;
-        string raw_call_site = splitted_line[6];
+        string raw_call_site = splitted_line[5];
         string no_hex_call_site = raw_call_site.substr(2,raw_call_site.length());
         stringstream ss_call_site;
         ss_call_site << hex << no_hex_call_site;
