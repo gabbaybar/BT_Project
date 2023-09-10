@@ -896,6 +896,42 @@ int add_ins_to_tc(INS ins, bool code_reorder = false){
 	return 0;
 }
 
+int create_nop_inst(xed_decoded_inst_t *xedd){
+	xed_encoder_instruction_t inst;
+ 	xed_error_enum_t xed_error;
+    xed_uint8_t itext[XED_MAX_INSTRUCTION_BYTES];
+    unsigned int ilen = XED_MAX_INSTRUCTION_BYTES;
+    unsigned int olen = 0;
+    xed_encoder_request_t enc_req;
+	xed_state_t state;
+	xed_state_zero(&state);
+	state.stack_addr_width=XED_ADDRESS_WIDTH_64b;
+    state.mmode=XED_MACHINE_MODE_LONG_64;
+	xed_inst0(&inst, 
+              state, XED_ICLASS_NOP, 64
+			  );
+	xed_encoder_request_zero_set_mode(&enc_req, &(inst.mode));
+	xed_bool_t convert_ok = xed_convert_to_encoder_request(&enc_req, &inst);
+	if (!convert_ok) {
+		fprintf(stderr,"conversion to encode request failed\n");
+		translated_rtn[translated_rtn_num].instr_map_entry = -1;
+		return -1;
+	}
+	xed_error = xed_encode(&enc_req, itext, ilen, &olen);
+	if (xed_error != XED_ERROR_NONE) {
+		cerr << "ERROR: xed encode failed" << endl;
+		translated_rtn[translated_rtn_num].instr_map_entry = -1;
+		return -1;
+	}
+	xed_decoded_inst_zero_set_mode(xedd, &(inst.mode));
+	xed_error = xed_decode(xedd, itext, olen);
+	if (xed_error != XED_ERROR_NONE) {
+		cerr << "ERROR: xed decode failed" << endl;
+		translated_rtn[translated_rtn_num].instr_map_entry = -1;
+		return -1;
+	}
+	return 0;
+}
 int create_lea_inst(int disp, xed_decoded_inst_t *xedd){
 	xed_encoder_instruction_t inst;
  	xed_error_enum_t xed_error;
@@ -1105,10 +1141,14 @@ int reorder_rtn(RTN rtn,INS jmp_ins, bool inside_inlined_rtn = false, xed_decode
 	ADDRINT jmp_address = INS_Address(jmp_ins);
 	INS target_ins;
 	
-	xed_decoded_inst_t xedd_cond_jmp;
+	xed_decoded_inst_t xedd_reorder_jmp;
 	if(INS_HasFallThrough(jmp_ins)){
-		if(revert_cond_jmp(jmp_ins,&xedd_cond_jmp)<0) return -1;
-		add_created_inst_to_tc(&xedd_cond_jmp,jmp_address,true);
+		if(revert_cond_jmp(jmp_ins,&xedd_reorder_jmp)<0) return -1;
+		add_created_inst_to_tc(&xedd_reorder_jmp,jmp_address,true);
+	}
+	else{
+		if(create_nop_inst(&xedd_reorder_jmp)<0) return -1;
+		add_created_inst_to_tc(&xedd_reorder_jmp,jmp_address,true);
 	}
 
 	for(target_ins = jmp_ins; INS_Address(target_ins) < jmp_target ; target_ins = INS_Next(target_ins)){

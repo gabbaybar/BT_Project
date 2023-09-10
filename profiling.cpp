@@ -13,7 +13,7 @@
 #define HOT_RTNS_TO_OPT 5
 #define TAKEN_THRESHOLD 0.6
 #define TARGET_DIFF_THRESHOLD 200
-#define JMP_EXEC_COUNT_THRESHOLD 3
+#define JMP_EXEC_COUNT_THRESHOLD 1000
 #define HOT_CALL_SITE_THRESHOLD 0.9
 #define INLINE_CAND_EXEC_THRESHOLD 3
 using namespace std;
@@ -218,7 +218,16 @@ void Trace(TRACE trace, void *v){
 			if(ins_target > ins_addr){ // The branch target is "below" in the code forward jump
                 if((ins_target - ins_addr) < TARGET_DIFF_THRESHOLD) continue;
                 if(forward_jmps.find(ins_addr) == forward_jmps.end()){
+                    forward_jmp_t forward_jmp;
+                    forward_jmp.address = ins_addr;
+                    forward_jmp.rtn_address = rtn_addr;
+                    forward_jmp.exec_count = 0;
+                    forward_jmp.is_cond_br = false;
+                    forward_jmp.taken_count = 0;
+                    forward_jmp.offset = ins_target - ins_addr;
+                    forward_jmps[ins_addr] = forward_jmp;
                     if(INS_HasFallThrough(bbl_tail)){
+                        forward_jmps[ins_addr].is_cond_br = true;
                         INS_InsertCall(bbl_tail, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
                                                 IARG_BRANCH_TAKEN,
                                                 IARG_PTR,
@@ -233,16 +242,7 @@ void Trace(TRACE trace, void *v){
                     }
                 }
                  else{
-                    forward_jmp_t forward_jmp;
-                    forward_jmp.address = ins_addr;
-                    forward_jmp.rtn_address = rtn_addr;
-                    forward_jmp.exec_count = 0;
-                    forward_jmp.is_cond_br = false;
-                    forward_jmp.taken_count = 0;
-                    forward_jmp.offset = ins_target - ins_addr;
-                    forward_jmps[ins_addr] = forward_jmp;
                     if(INS_HasFallThrough(bbl_tail)){
-                        forward_jmps[ins_addr].is_cond_br = true;
                         INS_InsertCall(bbl_tail, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
                                                 IARG_BRANCH_TAKEN,
                                                 IARG_PTR,
@@ -443,7 +443,7 @@ void write_csv(const string& filename) {
     // end of RTNS to translate
 
     // RTNS to inline
-    for (int i = 0; i < MAX_INLINE_RTNS; i++) {
+    for (int i = 0; i < MAX_RTNS; i++) {
         if(inline_routines_arr[i].rcount == 0) break;
         if(inline_routines_arr[i].hot_call_site == 0) continue;
         if(inline_routines_arr[i].valid == false) continue;
@@ -452,12 +452,15 @@ void write_csv(const string& filename) {
     }
     ofs << "inline_rtns, "<<inline_rtns_count<<"\n";
     ofs << "img_name,img_address,rtn_name,rtn_address,invoke_count,hot_call_site,caller_rtn\n";
-    for (int i = 0; i < MAX_INLINE_RTNS; i++) {
+    idx = 0;
+    for (int i = 0; i < MAX_RTNS; i++) {
+        if(idx >= MAX_INLINE_RTNS) break;
         if(inline_routines_arr[i].rcount == 0) break;
         if(inline_routines_arr[i].hot_call_site == 0) continue;
         if(inline_routines_arr[i].valid == false) continue;
         if(find(rtns_to_translate.begin(), rtns_to_translate.end(), inline_routines_arr[i].hot_call_site_rtn) == rtns_to_translate.end()) continue;
         all_translated_rtns.push_back(inline_routines_arr[i].address);
+        idx++;
         ofs << inline_routines_arr[i].img_name << ",0x" << hex << inline_routines_arr[i].img_address << ","
             << inline_routines_arr[i].name << ",0x" << hex << inline_routines_arr[i].address << ","
             << dec << inline_routines_arr[i].rcount << ",0x"
@@ -560,9 +563,39 @@ void Fini(INT32 code, void *v){
 
 int profiling()
 {
-    memset(inline_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
-    memset(normal_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
-    memset(forward_jmps_arr,0,sizeof(forward_jmp_t)*MAX_DIRECT_JMPS);
+    for(int i = 0 ; i<MAX_RTNS ; i++){
+        inline_routines_arr[i].name = "";
+        inline_routines_arr[i].rcount = 0;
+        inline_routines_arr[i].address = 0;
+        inline_routines_arr[i].img_name = "";
+        inline_routines_arr[i].img_address = 0;
+        inline_routines_arr[i].hot_call_site = 0;
+        inline_routines_arr[i].hot_call_site_rtn = 0;
+        inline_routines_arr[i].hot_call_site_count = 0;
+        inline_routines_arr[i].valid = 0;
+    }
+    for(int i = 0 ; i<MAX_RTNS ; i++){
+        normal_routines_arr[i].name = "";
+        normal_routines_arr[i].rcount = 0;
+        normal_routines_arr[i].address = 0;
+        normal_routines_arr[i].img_name = "";
+        normal_routines_arr[i].img_address = 0;
+        normal_routines_arr[i].hot_call_site = 0;
+        normal_routines_arr[i].hot_call_site_rtn = 0;
+        normal_routines_arr[i].hot_call_site_count = 0;
+        normal_routines_arr[i].valid = 0;
+    }
+    for(int i = 0 ; i<MAX_RTNS ; i++){
+        forward_jmps_arr[i].rtn_address = 0;
+        forward_jmps_arr[i].address = 0;
+        forward_jmps_arr[i].exec_count = 0;
+        forward_jmps_arr[i].is_cond_br = 0;
+        forward_jmps_arr[i].taken_count = 0;
+        forward_jmps_arr[i].offset = 0;
+    }
+    // memset(inline_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
+    // memset(normal_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
+    // memset(forward_jmps_arr,0,sizeof(forward_jmp_t)*MAX_DIRECT_JMPS);
     num_of_inline_rtns = 0;
     num_of_normal_rtns = 0;
     RTN_AddInstrumentFunction(Routine,0);
