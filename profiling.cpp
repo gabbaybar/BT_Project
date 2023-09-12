@@ -5,9 +5,8 @@
 #include <fstream>
 #include <unordered_map>
 
-#define MAX_RTNS 4000
-#define MAX_LOOPS 10000
-#define MAX_DIRECT_JMPS 10000
+#define MAX_RTNS 5000
+#define MAX_DIRECT_JMPS 5000
 #define MAX_CODE_REORDER_JMPS 30
 #define MAX_INLINE_RTNS 20
 #define HOT_RTNS_TO_OPT 5
@@ -72,6 +71,7 @@ bool rtn_is_valid_for_translation(INS ins, RTN rtn){
     return true;
 }
 bool ins_is_valid_for_inline(INS ins, RTN rtn){
+    if(INS_IsRet(ins)) return false;
     if(INS_IsDirectBranch(ins)){
         ADDRINT target = INS_DirectControlFlowTargetAddress(ins);
         if((target > INS_Address(RTN_InsTail(rtn))) || (target < INS_Address(RTN_InsHead(rtn)))){
@@ -277,72 +277,6 @@ void Trace(TRACE trace, void *v){
 }
 //end of TRACE handle
 
-// INST handle
-// void Instruction(INS ins, void *v){
-//     RTN rtn = RTN_FindByAddress(INS_Address(ins));
-//     if((normal_routines.find(RTN_Address(rtn)) == normal_routines.end()) && (inline_cand_routines.find(RTN_Address(rtn)) == inline_cand_routines.end())) return;
-//     if(INS_IsDirectControlFlow(ins) && INS_IsCall(ins)){
-//         ADDRINT target_addr = INS_DirectControlFlowTargetAddress(ins);
-//         ADDRINT ins_addr = INS_Address(ins);
-//         if(target_addr == RTN_Address(RTN_FindByAddress(ins_addr))) return; // recursive rtn
-//         if(callee_map.find(target_addr) == callee_map.end()){
-//             callee_map[target_addr][ins_addr] = {ins_addr , RTN_Address(RTN_FindByAddress(ins_addr)), 0};
-//         }
-//         else if(callee_map[target_addr].find(ins_addr) == callee_map[target_addr].end()){
-//             callee_map[target_addr][ins_addr] = {ins_addr , RTN_Address(RTN_FindByAddress(ins_addr)), 0};
-//         }
-//         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_call_count,
-//                                     IARG_PTR,
-//                                     &(callee_map[target_addr][ins_addr].count_calls),
-//                                     IARG_END);
-//     }
-//     if(INS_IsDirectControlFlow(ins) && INS_IsBranch(ins) && 
-//         (INS_DirectControlFlowTargetAddress(ins) > INS_Address(ins))){
-//         ADDRINT ins_addr = INS_Address(ins);
-//         if((INS_DirectControlFlowTargetAddress(ins) - INS_Address(ins)) < TARGET_DIFF_THRESHOLD) return;
-//         if(forward_jmps.find(ins_addr) == forward_jmps.end()){
-//             if(INS_HasFallThrough(ins)){
-//                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
-//                                         IARG_BRANCH_TAKEN,
-//                                         IARG_PTR,
-//                                         &(forward_jmps[ins_addr]),
-//                                         IARG_END);
-//             }
-//             else{
-//                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_uncond_jmp_count,
-//                                         IARG_PTR,
-//                                         &(forward_jmps[ins_addr].exec_count),
-//                                         IARG_END);
-//             }
-//         }
-//         else{
-//             forward_jmp_t forward_jmp;
-//             forward_jmp.address = ins_addr;
-//             forward_jmp.rtn_address = RTN_Address(RTN_FindByAddress(ins_addr));
-//             forward_jmp.exec_count = 0;
-//             forward_jmp.is_cond_br = false;
-//             forward_jmp.taken_count = 0;
-//             forward_jmps[ins_addr] = forward_jmp;
-//             if(INS_HasFallThrough(ins)){
-//                 forward_jmps[ins_addr].is_cond_br = true;
-//                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_cond_jmp_count,
-//                                         IARG_BRANCH_TAKEN,
-//                                         IARG_PTR,
-//                                         &(forward_jmps[ins_addr]),
-//                                         IARG_END);
-//             }
-//             else{
-//                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)do_uncond_jmp_count,
-//                                         IARG_PTR,
-//                                         &(forward_jmps[ins_addr].exec_count),
-//                                         IARG_END);
-//             }
-//            
-//         }
-//     }
-// }
-// end of INST handle
-
 // Sort and write RTNs to CSV
 int compare_inline_rtn(const void * a, const void * b){
     routine_t *rtn1 = (routine_t*)a;
@@ -477,7 +411,7 @@ void write_csv(const string& filename) {
         code_reorder_jmps_count++;
     }
 
-    ofs << "code_reorder_jmps_count, "<<code_reorder_jmps_count<<"\n";
+    ofs <<dec<< "code_reorder_jmps_count, "<<code_reorder_jmps_count<<"\n";
     ofs << "jmp_address,jmp_rtn_address,exec_count,taken_count,is_cond_br,offset\n";
     idx = 0;
     for (int i = 0; i < MAX_DIRECT_JMPS; i++) {
@@ -549,9 +483,6 @@ void create_hot_rtns_vec(){
 
 // FINI
 void Fini(INT32 code, void *v){
-    cout<<"Num of INLINE rtns: "<<inline_cand_routines.size()<<endl;
-    cout<<"Num of NORMAL rtns: "<<normal_routines.size()<<endl;
-    cout<<"Num of JMPS : "<<forward_jmps.size()<<endl;
     sort_inline_routines(inline_cand_routines,inline_routines_arr);
     normal_routines.insert(inline_cand_routines.begin(),inline_cand_routines.end());
     create_hot_rtns_vec();
@@ -585,7 +516,7 @@ int profiling()
         normal_routines_arr[i].hot_call_site_count = 0;
         normal_routines_arr[i].valid = 0;
     }
-    for(int i = 0 ; i<MAX_RTNS ; i++){
+    for(int i = 0 ; i<MAX_DIRECT_JMPS ; i++){
         forward_jmps_arr[i].rtn_address = 0;
         forward_jmps_arr[i].address = 0;
         forward_jmps_arr[i].exec_count = 0;
@@ -593,14 +524,10 @@ int profiling()
         forward_jmps_arr[i].taken_count = 0;
         forward_jmps_arr[i].offset = 0;
     }
-    // memset(inline_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
-    // memset(normal_routines_arr,0,sizeof(routine_t)*MAX_RTNS);
-    // memset(forward_jmps_arr,0,sizeof(forward_jmp_t)*MAX_DIRECT_JMPS);
     num_of_inline_rtns = 0;
     num_of_normal_rtns = 0;
     RTN_AddInstrumentFunction(Routine,0);
     TRACE_AddInstrumentFunction(Trace, 0);
-    //INS_AddInstrumentFunction(Instruction,0);
     PIN_AddFiniFunction(Fini,0);
     PIN_StartProgram();
     return 0;
