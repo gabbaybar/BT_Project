@@ -358,10 +358,7 @@ int add_new_instr_entry(xed_decoded_inst_t *xedd, ADDRINT pc, unsigned int size,
 
     // debug print new encoded instr:
 	if (KnobVerbose) {
-		cerr<<"    ";
-		if(code_reorder){
-			cerr<<"orig instr addr: "<<hex<<pc<<" ";
-		}
+		cerr<<"    orig instr addr: "<<hex<<pc<<" ";
 		cerr << "new instr:";
 		dump_instr_from_mem((ADDRINT *)instr_map[num_of_instr_map_entries-1].encoded_ins, instr_map[num_of_instr_map_entries-1].new_ins_addr);
 	}
@@ -1097,6 +1094,7 @@ int insert_inline_rtn(RTN rtn,ADDRINT caller_addr, ADDRINT ins_after_call_addr){
 				
 			}
 			else{
+
 				add_ins_to_tc(ins);			
 			}		
 		}
